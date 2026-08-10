@@ -1,0 +1,26 @@
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# Vite / build artefacts
+*.local
+*.tsbuildinfo
+
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+*.env
+config.local.*
+
+# OS
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.user
+
+#powerpoint
+*.pptx
