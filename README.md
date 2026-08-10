@@ -16,7 +16,7 @@ IBM watsonx Orchestrate (wxO) provides a powerful Agent Builder UI, but **there 
 A **Chrome/Edge browser extension** (Manifest V3) paired with a **local proxy server** that:
 
 1. **Passively captures** every meaningful change in the Agent Builder UI — agent definitions, tools, knowledge bases, and connection metadata (never credentials)
-2. **Stores versioned snapshots** as zip archives in IBM Cloud Object Storage (or any S3-compatible bucket)
+2. **Stores versioned snapshots** as zip archives in a pluggable storage backend — IBM COS, AWS S3, GCP Cloud Storage, Azure Blob, or **Google Drive**
 3. **Restores** any prior state with one click, using the ADK CLI to re-import all artefacts in the correct dependency order
 
 No changes to how you build. No manual export steps. Just an always-on safety net.
@@ -49,7 +49,8 @@ wxo-ui-agent-autosave/                      ← Chrome/Edge extension source
 | Snapshot assembler + debounce engine | 🔲 Not started |
 | Zip serialiser + snapshot format | 🔲 Not started |
 | Popup UI | 🔲 Not started (scaffold only) |
-| Local proxy server | 🔲 Not started |
+| Local proxy server — S3-compatible adapter (IBM COS / AWS S3 / GCS) | 🔲 Not started |
+| Local proxy server — Google Drive adapter (OAuth 2.0 + Drive API v3) | 🔲 Not started |
 | Integration testing | 🔲 Not started |
 
 ---
@@ -95,6 +96,7 @@ Quick links:
 - **Implement the Snapshot Assembler** (Sub-Task 3 in the plan)
 - **Implement the Zip Serialiser** using `fflate` (Sub-Task 4 in the plan)
 - **Choose and scaffold the proxy server** — Node/Express, Python/FastAPI, or Go/chi (Sub-Task 6 in the plan)
+- **Implement the Google Drive storage adapter** (FR-4.6) — requires a Google Cloud project; see Open Decision OD-4 in the requirements for the OAuth flow UX choice
 
 ---
 

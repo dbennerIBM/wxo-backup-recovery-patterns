@@ -48,7 +48,7 @@ The wxO ADK CLI can import and export agents programmatically, but it is a techn
 The solution is a **Chrome/Edge browser extension** (Manifest V3) paired with a **local proxy server**. Together they form a passive capture-and-restore pipeline:
 
 - The extension observes every relevant wxO API call in the background, assembles a complete snapshot of the active agent and all its dependencies, and transmits it to the local proxy.
-- The proxy stores versioned snapshot archives in IBM Cloud Object Storage (or any S3-compatible bucket).
+- The proxy stores versioned snapshot archives in a user-configured storage backend: IBM Cloud Object Storage, AWS S3, GCP Cloud Storage, Azure Blob Storage, or **Google Drive**.
 - The extension popup lets the builder browse snapshot history and restore any prior state with a single click.
 
 The restore is executed by the proxy using the **ADK CLI** — the same tooling watsonx Orchestrate already uses for CI/CD — so the restored agent is identical to what the ADK would have imported by hand.
@@ -72,7 +72,7 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 
 - Chrome and Edge browsers only (Manifest V3)
 - Passive, zero-configuration capture: the builder changes nothing about how they work
-- Versioned zip snapshots stored in IBM Cloud Object Storage (COS)
+- Versioned zip snapshots stored in a pluggable storage backend: IBM COS (default), AWS S3, GCP Cloud Storage, Azure Blob, or Google Drive
 - One-click restore to the same or a different wxO environment via the local proxy
 - Support for all four agent artefact types: **agent definitions**, **tools** (Python and OpenAPI), **knowledge bases** (including uploaded source documents), and **connections** (metadata only — never credentials)
 - Local proxy server (runs on the builder's machine); proxy technology (Node, Python, Go) is an open decision
@@ -116,12 +116,13 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
                                         │  Local Proxy Server │
                                         │  (Node / Python /   │
                                         │   Go)               │
-                                        │  - COS upload       │
+                                        │  - Storage upload   │
                                         │  - Restore via ADK  │
                                         └──────────┬──────────┘
                                                    │
                               ┌────────────────────▼──────────────┐
-                              │  IBM Cloud Object Storage         │
+                              │  Storage Backend (pluggable)      │
+                              │  IBM COS / S3 / GDrive / Azure    │
                               │  {tenant}/{agent}/{timestamp}.zip │
                               └───────────────────────────────────┘
 ```
@@ -133,9 +134,9 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 3. The `chrome.webRequest.onBeforeRequest` listener in the background service worker provides a complementary capture path for multipart POST bodies.
 4. All captured events flow to the **Snapshot Assembler** in the background service worker, which coalesces them into a single `AgentSnapshot` object.
 5. After 3 seconds of inactivity (debounced), the assembler serialises the snapshot into a zip archive and POSTs it to the local proxy at `http://localhost:7878/snapshots`.
-6. The proxy derives the bucket key (`{tenant}/{agent-name}/{ISO-timestamp}.zip`), uploads the zip to IBM COS, and responds with the stored object key.
+6. The proxy derives the storage path (`{tenant}/{agent-name}/{ISO-timestamp}.zip`), uploads the zip to the configured storage backend (IBM COS, S3, GCP, Azure Blob, or Google Drive), and responds with the stored object key or file ID.
 7. The extension popup queries the proxy's `/snapshots` endpoint to list available snapshots and can initiate a restore via `/restore`.
-8. On restore, the proxy downloads the zip from COS, unpacks it to a temp directory, and runs the ADK CLI to re-import artefacts in dependency order.
+8. On restore, the proxy downloads the zip from the configured storage backend, unpacks it to a temp directory, and runs the ADK CLI to re-import artefacts in dependency order.
 
 ---
 
@@ -214,12 +215,14 @@ connections/
 
 | ID | Requirement |
 |---|---|
-| FR-4.1 | The proxy MUST store each snapshot zip in IBM Cloud Object Storage using the key path: `{tenant}/{agent-name}/{ISO-8601-timestamp}.zip`. |
-| FR-4.2 | The proxy MUST use the COS S3-compatible API (the AWS SDK v3 `@aws-sdk/client-s3` with a custom `endpoint` is the reference implementation). |
-| FR-4.3 | The storage adapter MUST be abstracted behind an interface so that AWS S3, GCP Cloud Storage, and Azure Blob Storage can be substituted without changing the proxy's business logic. |
-| FR-4.4 | COS credentials (`COS_ENDPOINT`, `COS_API_KEY`, `COS_BUCKET`, `COS_INSTANCE_CRN`) MUST be read from environment variables or a local config file, never hardcoded. |
-| FR-4.5 | The extension MUST maintain a local index of the most recent 5 snapshots in `chrome.storage.local` (tenant, agent name, timestamp, and proxy URL only — no file bytes) so that the popup can display recent history even when the proxy is temporarily offline. |
-| FR-4.6 | In-flight assembly state in the background service worker MUST be persisted to `chrome.storage.session` (not in-memory only) so that brief MV3 service worker suspensions do not lose a partially assembled snapshot. |
+| FR-4.1 | The proxy MUST store each snapshot zip using the logical path: `{tenant}/{agent-name}/{ISO-8601-timestamp}.zip`, interpreted appropriately by each storage adapter (as an object key for S3-compatible stores; as a nested folder path for Google Drive). |
+| FR-4.2 | The proxy MUST implement a **storage adapter interface** with at minimum two concrete adapters shipped in v1: (a) an **S3-compatible adapter** covering IBM COS, AWS S3, and GCP Cloud Storage (using the AWS SDK v3 `@aws-sdk/client-s3` with a configurable `endpoint`); and (b) a **Google Drive adapter** using the Google Drive API v3 via OAuth 2.0. |
+| FR-4.3 | The storage adapter interface MUST define the following operations: `upload(path, bytes) → id`, `download(id) → bytes`, `list(prefix) → { id, path, timestamp, size }[]`, and `delete(id)`. All other proxy logic MUST depend only on this interface, never on a concrete adapter. |
+| FR-4.4 | The active storage backend MUST be selected via a `STORAGE_PROVIDER` environment variable or config file key. Valid values: `cos`, `s3`, `gcs`, `azure`, `gdrive`. |
+| FR-4.5 | For the S3-compatible adapter, credentials (`COS_ENDPOINT`, `COS_API_KEY`, `COS_BUCKET`, `COS_INSTANCE_CRN` for IBM COS; standard `AWS_*` vars for AWS S3/GCS) MUST be read from environment variables or a local config file, never hardcoded. |
+| FR-4.6 | For the Google Drive adapter: (a) the proxy MUST implement the OAuth 2.0 authorization code flow using a Google Cloud project's client ID and secret, stored in environment variables (`GDRIVE_CLIENT_ID`, `GDRIVE_CLIENT_SECRET`); (b) the resulting OAuth tokens MUST be persisted to a local token cache file (path configurable, default `~/.wxo-autosave/gdrive-token.json`) and refreshed automatically using the refresh token; (c) on first run with `gdrive` provider, the proxy MUST print an authorization URL for the user to visit and accept a callback code, completing the one-time auth flow; (d) snapshots MUST be stored in a Google Drive folder named `wxo-autosave` (created automatically if absent), with subfolders mirroring the `{tenant}/{agent-name}/` path structure. |
+| FR-4.7 | The extension MUST maintain a local index of the most recent 5 snapshots in `chrome.storage.local` (tenant, agent name, timestamp, and proxy URL only — no file bytes) so that the popup can display recent history even when the proxy is temporarily offline. |
+| FR-4.8 | In-flight assembly state in the background service worker MUST be persisted to `chrome.storage.session` (not in-memory only) so that brief MV3 service worker suspensions do not lose a partially assembled snapshot. |
 
 ---
 
@@ -251,7 +254,7 @@ connections/
 | FR-6.4 | Each snapshot row MUST include a "Restore" button. Clicking it MUST first call `GET /restore/preflight` and render the preflight report before any restore action is taken. |
 | FR-6.5 | The preflight display MUST show: one row per connection requiring re-credentialing (showing `app_id` and `kind`), and a warning for any `sourceUnavailable` tools. The builder MUST explicitly acknowledge this list before the restore proceeds. |
 | FR-6.6 | After the builder confirms, the popup MUST POST to `/restore` and display streaming progress and the final per-artefact result log. |
-| FR-6.7 | The popup MUST include a settings panel (stored in `chrome.storage.sync`) with: configurable proxy port (default `7878`), debounce delay in seconds, and bucket path prefix override. |
+| FR-6.7 | The popup MUST include a settings panel (stored in `chrome.storage.sync`) with: configurable proxy port (default `7878`), debounce delay in seconds, storage path prefix override, and a read-only display of the active storage provider reported by the proxy. |
 | FR-6.8 | When the local proxy is offline, the popup MUST fall back to the locally cached snapshot index from `chrome.storage.local` and display a warning that live history and restore are unavailable. |
 | FR-6.9 | The popup bundle MUST NOT include any server-side Node APIs and MUST be kept as small as practical (no heavy UI framework required). |
 
@@ -262,7 +265,7 @@ connections/
 | ID | Requirement |
 |---|---|
 | FR-7.1 | The proxy MUST start with a single command and listen on a configurable port (default `7878`). |
-| FR-7.2 | `POST /snapshots` — accept a zip binary body, parse the embedded `manifest.json` to derive the bucket key, upload to the configured object storage provider, return HTTP 201 with the stored object key. |
+| FR-7.2 | `POST /snapshots` — accept a zip binary body, parse the embedded `manifest.json` to derive the storage path, upload via the active storage adapter, return HTTP 201 with `{ key, provider }` where `provider` identifies the backend used. |
 | FR-7.3 | `GET /snapshots?agent={name}&tenant={tenant}` — list all snapshot objects under the `{tenant}/{agent-name}/` prefix; return a JSON array of `{ key, timestamp, size }`. |
 | FR-7.4 | `GET /restore/preflight?key={zip-key}` — see FR-5.1 and FR-5.2. |
 | FR-7.5 | `POST /restore` — see FR-5.3 through FR-5.10. |
@@ -280,7 +283,7 @@ connections/
 | NFR-1 | **Transparency** | The extension MUST be a passive observer. It MUST NOT modify any request, delay any response, or in any way alter the behaviour of the wxO Agent Builder UI. |
 | NFR-2 | **Performance** | Network interception and event dispatch MUST add no perceptible latency to wxO UI interactions. The debounce mechanism ensures that snapshot assembly and zip serialisation happen out-of-band. |
 | NFR-3 | **Reliability** | The extension MUST continue to function correctly after MV3 service worker suspension events. In-flight assembly state MUST be preserved across suspensions using `chrome.storage.session`. |
-| NFR-4 | **Extensibility** | The object storage adapter MUST be designed behind an interface so that IBM COS, AWS S3, GCP Cloud Storage, and Azure Blob can be used without changes to the rest of the proxy. |
+| NFR-4 | **Extensibility** | The storage adapter interface MUST decouple all backend-specific logic so that IBM COS, AWS S3, GCP Cloud Storage, Azure Blob, and Google Drive can all be used without changes to the proxy's core business logic. Adding a new backend requires only implementing the four-method adapter interface and registering it by name. |
 | NFR-5 | **Testability** | The credential scrubber and multipart decoder MUST be implemented as pure functions with no browser dependencies and MUST have unit tests. The zip serialiser MUST have a round-trip test. |
 | NFR-6 | **Maintainability** | If wxO changes its REST API paths, only the endpoint pattern list in the content script needs to be updated. No business logic should be hardcoded to specific API paths. |
 | NFR-7 | **Developer Experience** | A single `npm run build` in the extension project MUST produce a fully loadable Chrome extension in `dist/`. The proxy MUST start with a single command. |
@@ -325,7 +328,8 @@ The following decisions require resolution before or during implementation. Comm
 | OD-1 | **Proxy server technology** | Node.js/Express, Python/FastAPI, Go/chi | No functional dependency on choice; pick based on contributor preference |
 | OD-2 | **Response body interception strategy** | Content script `window.fetch` override (current) vs. offscreen document vs. other | Content script fetch override is the current design; confirm this holds against CSP policies on the wxO SaaS domain |
 | OD-3 | **Proxy authentication** | None (localhost only) vs. shared-secret request header | Localhost-only is sufficient for v1; a shared secret may be warranted for teams sharing a proxy over a local network |
-| OD-4 | **Additional cloud storage providers for v1** | IBM COS only vs. also ship AWS S3 adapter | The interface is designed for extensibility; the question is whether to ship two adapters in v1 or just the interface stub |
+| OD-4 | **Google Drive OAuth flow UX** | CLI-based browser-open + localhost callback vs. manual copy-paste code | The proxy could open the browser automatically (`open`/`xdg-open`) or print the URL for the user to visit; the callback could be a temporary localhost HTTP listener or a manual code entry prompt — choose based on contributor preference |
+| OD-7 | **Google Drive shared drives** | Personal Drive only vs. also support Shared Drives | Shared Drives require a `driveId` parameter in the Drive API; v1 can target personal Drive only and add Shared Drive support later |
 | OD-5 | **wxO API endpoint verification** | Paths in these requirements are derived from ADK documentation and DevTools inspection; they require confirmation against a live wxO SaaS session before Sub-Task 2 implementation finalises | A contributor with wxO SaaS access should verify the endpoint list and open an Issue if any paths differ |
 | OD-6 | **Extension distribution** | Side-load only (current) vs. Chrome Web Store for v2 | Side-load is sufficient for v1; Web Store submission is a future consideration |
 
@@ -339,13 +343,16 @@ The following decisions require resolution before or during implementation. Comm
 | **Agent Artefact** | Any resource associated with an agent: the agent definition itself, its tools, its knowledge bases, and its connections |
 | **app_id** | The identifier for a wxO connection object. Tools reference connections by `app_id`. It is the connection name, not a credential. |
 | **COS** | IBM Cloud Object Storage — the default S3-compatible blob storage target for snapshot zips |
+| **Google Drive adapter** | The storage adapter implementation that stores snapshot zips as files in a user's Google Drive, organised under an `wxo-autosave/` folder hierarchy, using the Google Drive API v3 with OAuth 2.0 |
+| **OAuth 2.0 authorization code flow** | The three-legged OAuth flow used by the Google Drive adapter: the proxy generates an authorization URL, the user grants access in the browser, and the proxy exchanges the returned code for access and refresh tokens |
+| **Storage adapter interface** | The abstract interface all storage backends implement, defining `upload`, `download`, `list`, and `delete` operations; the proxy's business logic depends only on this interface |
 | **Content Script** | A JavaScript file injected by the extension into the wxO Agent Builder page, with access to the page's DOM and JavaScript context, including `window.fetch` |
 | **Debounce** | A technique that delays an action until a specified period of inactivity has passed, preventing a flood of identical operations |
 | **expectedCredentials** | Metadata embedded in a tool definition that names the connection (`app_id`) and credential type a tool requires at runtime |
 | **kind** | The authentication scheme type of a wxO connection (e.g. `API_KEY_AUTH`, `BASIC_AUTH`, `BEARER_TOKEN`, `OAUTH_CLIENT_CREDENTIALS`) |
 | **MV3** | Chrome Extension Manifest Version 3 — the current extension format that replaces MV2; it uses a service worker instead of a background page |
 | **Proactive fetch** | When the assembler detects that a referenced tool has not been captured in the current session, it issues an authenticated API request to capture that tool's details |
-| **Proxy server** | A local HTTP server (runs on the builder's machine) that holds storage credentials, accepts snapshots from the extension, and executes restores via the ADK CLI |
+| **Proxy server** | A local HTTP server (runs on the builder's machine) that holds storage credentials or OAuth tokens, accepts snapshots from the extension, and executes restores via the ADK CLI |
 | **Scrubber** | A pure function that removes credential values from a captured payload before it is stored, emitted, or transmitted |
 | **Service Worker (MV3)** | The background execution context for a Manifest V3 Chrome extension; it is ephemeral and may be suspended by the browser at any time |
 | **Snapshot** | A complete, versioned zip archive of all artefacts associated with a single agent at a point in time |
