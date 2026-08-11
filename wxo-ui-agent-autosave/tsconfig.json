@@ -12,7 +12,7 @@
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "..",
     "resolveJsonModule": true
   },
   "include": ["src/**/*", "vite.config.ts"],
