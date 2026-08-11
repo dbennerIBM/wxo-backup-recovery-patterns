@@ -20,7 +20,7 @@ export interface ExtensionMessage {
   payload: unknown;
 }
 
-// ─── Snapshot types (stubs — fully defined in Sub-Task 3) ─────────────────────
+// ─── Snapshot types ────────────────────────────────────────────────────────────
 
 export interface ConnectionMeta {
   app_id: string;
@@ -28,13 +28,47 @@ export interface ConnectionMeta {
   server_url?: string;
 }
 
+export interface SnapshotAgent {
+  id: string;
+  name: string;
+  display_name?: string;
+  description?: string;
+  instructions?: string;
+  llm?: string;
+  style?: string;
+  guidelines: unknown[];
+  knowledge_base: string[];
+  collaborators: unknown[];
+  tags: unknown;
+  structured_output: unknown;
+}
+
+export interface SnapshotTool {
+  id: string;
+  name: string;
+  description?: string;
+  binding?: unknown;
+}
+
+export interface SnapshotFile {
+  filename: string;
+  contentType: string;
+  bytes: number[];
+}
+
+export interface SnapshotKnowledgeBase {
+  id: string;
+  meta: Record<string, unknown>;
+  files: SnapshotFile[];
+}
+
 export interface AgentSnapshot {
   schemaVersion: string;
   capturedAt: string;
   tenant: string;
-  agent: object;
-  tools: object[];
-  knowledgeBases: object[];
+  agent: SnapshotAgent;
+  tools: SnapshotTool[];
+  knowledgeBases: SnapshotKnowledgeBase[];
   connections: ConnectionMeta[];
 }
 
@@ -44,5 +78,5 @@ export const PROXY_DEFAULT_PORT = 7878;
 export const DEBOUNCE_DEFAULT_MS = 3000;
 export const SCHEMA_VERSION = "1.0.0";
 
-/** wxO SaaS hostname pattern */
-export const WXO_HOSTNAME = "*.watson-orchestrate.ibm.com";
+/** wxO SaaS hostname pattern — CONFIRMED: cloud.ibm.com, not ibm.com */
+export const WXO_HOSTNAME = "*.watson-orchestrate.cloud.ibm.com";

@@ -22,6 +22,7 @@ import {
 } from "../shared/messages";
 import { scrubSecrets, scrubConnectionPayload } from "../shared/scrubber";
 import { parseMultipart } from "../shared/multipart";
+import { registerAssembler } from "./assembler";
 
 // ─── Ephemeral state ──────────────────────────────────────────────────────────
 
@@ -179,14 +180,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
  * data bytes as an ArrayBuffer fragment array. We decode it here as a
  * complementary/fallback path alongside the content script interceptor.
  */
+// CONFIRMED from HAR 4 (Aug 2026):
+//   - Host: *.watson-orchestrate.cloud.ibm.com
+//   - KB create:   POST /mfe_builder/api/v1/orchestrate/knowledge-bases/documents
+//   - KB upload:   PUT  /mfe_builder/api/v1/orchestrate/knowledge-bases/{id}/documents
+//   - Tool upload: POST /mfe_builder/api/v2/builder/tools (multipart; hand-crafted only)
+//   - Catalog tools use JSON create-from-template — no webRequest interception needed.
+const KB_CREATE_URL_FILTER =
+  "*://*.watson-orchestrate.cloud.ibm.com/mfe_builder/api/v1/orchestrate/knowledge-bases/documents*";
 const KB_UPLOAD_URL_FILTER =
-  "*://*.watson-orchestrate.ibm.com/*/v2/orchestrate/knowledge-bases/*/documents*";
+  "*://*.watson-orchestrate.cloud.ibm.com/mfe_builder/api/v1/orchestrate/knowledge-bases/*/documents*";
 const TOOL_UPLOAD_URL_FILTER =
-  "*://*.watson-orchestrate.ibm.com/*/v2/orchestrate/tools*";
+  "*://*.watson-orchestrate.cloud.ibm.com/mfe_builder/api/v2/builder/tools*";
 
+const KB_CREATE_RE =
+  /\/mfe_builder\/api\/v1\/orchestrate\/knowledge-bases\/documents(\?|$)/;
 const KB_UPLOAD_RE =
-  /\/v2\/orchestrate\/knowledge-bases\/([^/?]+)\/documents/;
-const TOOL_UPLOAD_RE = /\/v2\/orchestrate\/tools(\?|$)/;
+  /\/mfe_builder\/api\/v1\/orchestrate\/knowledge-bases\/([^/?]+)\/documents(\?|$)/;
+const TOOL_UPLOAD_RE = /\/mfe_builder\/api\/v2\/builder\/tools(\?|$)/;
 
 /**
  * Reconstruct the raw bytes from a webRequest requestBody.
@@ -248,51 +259,49 @@ function decodeAndEmitMultipart(
   }
 }
 
+const ALL_UPLOAD_URL_FILTERS = [
+  KB_CREATE_URL_FILTER,
+  KB_UPLOAD_URL_FILTER,
+  TOOL_UPLOAD_URL_FILTER,
+];
+
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (details.method !== "POST") return;
+    // KB create is POST; KB doc upload is PUT; tool upload is POST.
+    const method = details.method;
+    if (method !== "POST" && method !== "PUT") return;
     if (!details.requestBody) return;
 
     const url = details.url;
 
-    const kbMatch = KB_UPLOAD_RE.exec(url);
-    const isToolUpload = TOOL_UPLOAD_RE.test(url);
+    const isKbCreate   = method === "POST" && KB_CREATE_RE.test(url);
+    const kbUploadMatch = method === "PUT"  ? KB_UPLOAD_RE.exec(url) : null;
+    const isToolUpload  = method === "POST" && TOOL_UPLOAD_RE.test(url);
 
-    if (kbMatch === null && !isToolUpload) return;
+    if (!isKbCreate && kbUploadMatch === null && !isToolUpload) return;
 
     const bytes = rawBytesFromRequestBody(details.requestBody);
-    if (bytes === null) return;
+    if (bytes === null || bytes.length === 0) return;
 
-    // We need the Content-Type header to extract the multipart boundary.
-    // onBeforeRequest doesn't give us request headers — we capture those in
-    // onBeforeSendHeaders if needed. However, for webRequest we can derive the
-    // boundary from the raw bytes: look for the "--" prefix on the first line.
-    // Alternatively we store headers via onBeforeSendHeaders (see below).
-    // For now, look up the stored content type for this request ID.
+    // Look up the stored Content-Type (set by onBeforeSendHeaders).
     const contentType = pendingContentTypes.get(details.requestId);
     if (!contentType) {
-      // Content type not yet known — store bytes for later (when headers arrive
-      // via onBeforeSendHeaders, which fires before the body is sent).
-      // In practice onBeforeSendHeaders fires before onBeforeRequest for the
-      // body — if we get here without a content type, skip this path and let
-      // the content script interceptor handle it.
+      // Content type not yet known — let the content script interceptor handle it.
       return;
     }
     pendingContentTypes.delete(details.requestId);
 
-    const kbId = kbMatch ? (kbMatch[1] ?? null) : null;
+    // kbId="" for KB_CREATE (unknown until response arrives); group[1] for PUT.
+    const kbId = isKbCreate ? "" : (kbUploadMatch ? (kbUploadMatch[1] ?? null) : null);
     decodeAndEmitMultipart(bytes, contentType, kbId);
   },
-  {
-    urls: [KB_UPLOAD_URL_FILTER, TOOL_UPLOAD_URL_FILTER],
-    types: ["xmlhttprequest", "other"],
-  },
+  { urls: ALL_UPLOAD_URL_FILTERS, types: ["xmlhttprequest", "other"] },
   ["requestBody"],
 );
 
 /**
- * Capture the Content-Type header for multipart POST requests so that
- * onBeforeRequest can decode the boundary correctly.
+ * Capture the Content-Type header for multipart requests so that
+ * onBeforeRequest can decode the multipart boundary correctly.
  *
  * Keyed by requestId; entries are cleaned up after use or on completion.
  */
@@ -300,7 +309,8 @@ const pendingContentTypes = new Map<string, string>();
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
-    if (details.method !== "POST") return;
+    // Accept POST (KB create, tool upload) and PUT (KB doc upload).
+    if (details.method !== "POST" && details.method !== "PUT") return;
     const ct = details.requestHeaders?.find(
       (h) => h.name.toLowerCase() === "content-type",
     );
@@ -308,10 +318,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       pendingContentTypes.set(details.requestId, ct.value);
     }
   },
-  {
-    urls: [KB_UPLOAD_URL_FILTER, TOOL_UPLOAD_URL_FILTER],
-    types: ["xmlhttprequest", "other"],
-  },
+  { urls: ALL_UPLOAD_URL_FILTERS, types: ["xmlhttprequest", "other"] },
   ["requestHeaders"],
 );
 
@@ -322,11 +329,11 @@ function cleanupRequest(
   pendingContentTypes.delete(details.requestId);
 }
 chrome.webRequest.onCompleted.addListener(cleanupRequest, {
-  urls: [KB_UPLOAD_URL_FILTER, TOOL_UPLOAD_URL_FILTER],
+  urls: ALL_UPLOAD_URL_FILTERS,
   types: ["xmlhttprequest", "other"],
 });
 chrome.webRequest.onErrorOccurred.addListener(cleanupRequest, {
-  urls: [KB_UPLOAD_URL_FILTER, TOOL_UPLOAD_URL_FILTER],
+  urls: ALL_UPLOAD_URL_FILTERS,
   types: ["xmlhttprequest", "other"],
 });
 
@@ -335,5 +342,7 @@ chrome.webRequest.onErrorOccurred.addListener(cleanupRequest, {
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("[wxo-autosave] extension installed/updated:", details.reason);
 });
+
+registerAssembler({ on });
 
 console.log("[wxo-autosave] background service worker initialised");
