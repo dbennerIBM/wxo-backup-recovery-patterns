@@ -9,23 +9,26 @@
  * Set of top-level and nested keys that must always be redacted.
  * Matching is case-insensitive so that "Api_Key", "API_KEY", and "api_key" are all caught.
  */
+/**
+ * All entries are pre-normalized (lowercased, hyphens/underscores stripped) so
+ * that isSecretKey's normalisation of the incoming key matches correctly.
+ * e.g. "auth_config" → "authconfig", "client_secret" → "clientsecret".
+ */
 const SECRET_KEYS = new Set([
-  "api_key",
-  "apikey",
-  "token",
-  "password",
-  "passwd",
-  "client_secret",
-  "clientsecret",
-  "auth_config",
-  "authorization",
-  "secret",
-  "access_token",
-  "refresh_token",
-  "id_token",
-  "private_key",
-  "credential",
-  "credentials",
+  "apikey",        // api_key, apikey, api-key
+  "token",         // token
+  "password",      // password
+  "passwd",        // passwd
+  "clientsecret",  // client_secret, clientsecret, client-secret
+  "authconfig",    // auth_config, auth-config
+  "authorization", // authorization
+  "secret",        // secret
+  "accesstoken",   // access_token, access-token
+  "refreshtoken",  // refresh_token, refresh-token
+  "idtoken",       // id_token, id-token
+  "privatekey",    // private_key, private-key
+  "credential",    // credential
+  "credentials",   // credentials
 ]);
 
 function isSecretKey(key: string): boolean {
@@ -71,9 +74,22 @@ export function scrubConnectionPayload(
 ): ScrubbedConnection {
   const app_id =
     String(raw["app_id"] ?? raw["name"] ?? raw["id"] ?? "");
-  const kind = String(raw["kind"] ?? raw["type"] ?? raw["auth_scheme"] ?? "");
+  // CONFIRMED from HAR 3: the connections/applications/authtype endpoint uses
+  // security_scheme as the stable kind identifier (e.g. "api_key_auth", "oauth2",
+  // "bearer_token", "basic_auth", "key_value_creds"). auth_type is a sub-type
+  // qualifier (e.g. "oauth2_auth_code") but is empty string for non-OAuth connections.
+  // We prefer security_scheme as the kind value; fall back through known aliases.
+  const kind = String(
+    raw["security_scheme"] ??
+    raw["kind"] ??
+    raw["type"] ??
+    raw["auth_scheme"] ??
+    ""
+  );
   const server_url =
-    raw["server_url"] !== undefined ? String(raw["server_url"]) : undefined;
+    raw["server_url"] !== undefined && raw["server_url"] !== null
+      ? String(raw["server_url"])
+      : undefined;
 
   const result: ScrubbedConnection = { app_id, kind };
   if (server_url !== undefined) {

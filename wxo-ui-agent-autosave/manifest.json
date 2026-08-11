@@ -11,7 +11,7 @@
   ],
 
   "host_permissions": [
-    "*://*.watson-orchestrate.ibm.com/*",
+    "*://*.watson-orchestrate.cloud.ibm.com/*",
     "http://localhost/*"
   ],
 
@@ -23,7 +23,7 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.watson-orchestrate.ibm.com/*"
+        "*://*.watson-orchestrate.cloud.ibm.com/*"
       ],
       "js": ["src/content/index.ts"],
       "run_at": "document_start"
