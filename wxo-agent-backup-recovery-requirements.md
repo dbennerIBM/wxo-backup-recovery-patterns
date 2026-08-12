@@ -1,9 +1,18 @@
 # wxO Agent Builder — Backup & Recovery: Project Requirements
 
-> **Status:** Draft v1.0 — open for community collaboration  
-> **Maintainer:** @dbenner  
-> **Repo:** [wxO Backup Recovery Patterns](https://github.com/dbenner/wxo-backup-recovery-patterns)  
+> **Status:** Draft v1.1 — updated after 4 HAR recording sessions (Aug 2026)
+> **Maintainer:** @dbenner
+> **Repo:** [wxO Backup Recovery Patterns](https://github.com/dbenner/wxo-backup-recovery-patterns)
 > **Contributions welcome:** Please open an Issue or PR. See [Contributing](#contributing) for guidance.
+
+---
+
+## Change Log
+
+| Version | Date | Summary |
+|---|---|---|
+| v1.0 | Aug 2026 | Initial draft — endpoints derived from ADK documentation and plan assumptions |
+| v1.1 | Aug 2026 | **API corrections from 4 live HAR recordings.** All endpoint paths updated to confirmed values. Auth model corrected. KB paths fully revised. Proactive fetch requirement revised. See [§ Deviations from v1.0](#deviations-from-v10-confirmed-by-har-analysis) for a full summary of changes. |
 
 ---
 
@@ -26,8 +35,9 @@
 8. [Security Requirements](#8-security-requirements)
 9. [Constraints & Boundaries](#9-constraints--boundaries)
 10. [Open Decisions](#10-open-decisions)
-11. [Glossary](#11-glossary)
-12. [Contributing](#12-contributing)
+11. [Deviations from v1.0](#deviations-from-v10-confirmed-by-har-analysis)
+12. [Glossary](#12-glossary)
+13. [Contributing](#13-contributing)
 
 ---
 
@@ -101,7 +111,7 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 │  └─────────────────────┘                                  ▼  │
 │                                         ┌──────────────────┐ │
 │  ┌─────────────────────┐  webRequest    │  Background SW   │ │
-│  │  wxO Agent Builder  │──(POST bodies)▶│  (MV3 service    │ │
+│  │  wxO Agent Builder  │──(POST/PUT)───▶│  (MV3 service    │ │
 │  │  SaaS UI            │                │   worker)        │ │
 │  └─────────────────────┘                │  - Assembler     │ │
 │                                         │  - Debounce      │ │
@@ -130,11 +140,11 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 **Data flow summary:**
 
 1. Builder uses the wxO Agent Builder UI normally.
-2. The content script's `fetch` interceptor captures every JSON response from wxO API endpoints of interest, as well as multipart upload request bodies (KB documents, OpenAPI spec files).
-3. The `chrome.webRequest.onBeforeRequest` listener in the background service worker provides a complementary capture path for multipart POST bodies.
+2. The content script's `fetch` interceptor captures every JSON response from wxO API endpoints of interest, as well as multipart request bodies for KB document uploads.
+3. The `chrome.webRequest.onBeforeRequest` listener in the background service worker provides a complementary capture path for multipart POST and PUT bodies.
 4. All captured events flow to the **Snapshot Assembler** in the background service worker, which coalesces them into a single `AgentSnapshot` object.
 5. After 3 seconds of inactivity (debounced), the assembler serialises the snapshot into a zip archive and POSTs it to the local proxy at `http://localhost:7878/snapshots`.
-6. The proxy derives the storage path (`{tenant}/{agent-name}/{ISO-timestamp}.zip`), uploads the zip to the configured storage backend (IBM COS, S3, GCP, Azure Blob, or Google Drive), and responds with the stored object key or file ID.
+6. The proxy derives the storage path (`{tenant}/{agent-name}/{ISO-timestamp}.zip`), uploads the zip to the configured storage backend, and responds with the stored object key or file ID.
 7. The extension popup queries the proxy's `/snapshots` endpoint to list available snapshots and can initiate a restore via `/restore`.
 8. On restore, the proxy downloads the zip from the configured storage backend, unpacks it to a temp directory, and runs the ADK CLI to re-import artefacts in dependency order.
 
@@ -144,20 +154,23 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 
 ### FR-1 Passive Capture
 
+> **Note — v1.1 update:** All endpoint paths in FR-1 have been corrected from the original draft to reflect confirmed values from 4 live HAR recordings. See [§ Deviations from v1.0](#deviations-from-v10-confirmed-by-har-analysis) for the full mapping of old → new paths.
+
 | ID | Requirement |
 |---|---|
-| FR-1.1 | The extension MUST capture agent definitions from `GET /v2/orchestrate/agents/unified` and `GET /v2/orchestrate/agents/{id}` responses without any builder action. |
-| FR-1.2 | The extension MUST capture tool metadata from `GET /v2/orchestrate/tools`, `GET /v2/orchestrate/tools/{id}`, and the `POST /v2/orchestrate/tools` creation response. |
-| FR-1.3 | The extension MUST capture the `app_id` association and `expectedCredentials` for each tool at both creation time (POST response) and on subsequent GET responses. |
-| FR-1.4 | The extension MUST capture knowledge base metadata from `GET /v2/orchestrate/knowledge-bases` and `GET /v2/orchestrate/knowledge-bases/{id}`. |
-| FR-1.5 | The extension MUST capture raw file bytes and filenames from multipart `POST /v2/orchestrate/knowledge-bases/{id}/documents` uploads. |
-| FR-1.6 | The extension MUST capture raw spec file bytes and filenames from multipart `POST /v2/orchestrate/tools` uploads (for OpenAPI spec tools). |
-| FR-1.7 | The extension MUST capture connection metadata from `GET /v2/orchestrate/connections` and `GET /v2/orchestrate/connections/{id}`. |
-| FR-1.8 | When the assembler receives an `AGENT_CAPTURED` event and the agent references tools that have not yet been captured in the current session, the assembler MUST proactively fetch those tool details via `GET /v2/orchestrate/tools/{name}` using the most recently observed session bearer token. |
+| FR-1.1 | The extension MUST capture agent definitions from `GET /mfe_builder/api/v2/builder/agents` (list, minimal fields) and `GET /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}` (full detail) responses without any builder action. |
+| FR-1.2 | The extension MUST capture the full agent state from `PATCH /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}` responses, which include `toolsSelected[]` with complete tool binding objects. This PATCH response is the richest single capture point and is the primary snapshot trigger. |
+| FR-1.3 | The extension MUST capture tool metadata from `GET /mfe_builder/api/v2/builder/tools?ids={uuid}&ids={uuid}&...` (batch-fetch by UUID list). The response is a bare JSON array. |
+| FR-1.4 | The extension MUST capture connection metadata from `GET /mfe_builder/api/v1/orchestrate/connections/applications`. The response envelope is `{ applications: [...] }` — not `{ resources: [...] }`. |
+| FR-1.5 | The extension MUST capture knowledge base metadata from `GET /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}`. |
+| FR-1.6 | The extension MUST capture raw file bytes and filenames from the multipart `POST /mfe_builder/api/v1/orchestrate/knowledge-bases/documents` request body. This single request both creates the KB and uploads the first document; the KB UUID is returned in the `201` response body (`knowledge_base` field) rather than in the URL. The assembler MUST correlate pending file bytes with the UUID from the response. |
+| FR-1.7 | The extension MUST capture raw file bytes and filenames from the multipart `PUT /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}/documents` request body. Note: the method is `PUT`, not `POST`. |
+| FR-1.8 | The extension MUST capture raw spec file bytes and filenames from multipart `POST /mfe_builder/api/v2/builder/tools` uploads (hand-crafted Python/OpenAPI tools only). Catalog tools added via the UI use a JSON `POST /mfe_builder/api/v1/builder/tools/create-from-template` request; their source files reside in S3 and are NOT transmitted to the mfe_builder API. For catalog tools, the snapshot records metadata and binding only, and sets `sourceUnavailable: true`. |
 | FR-1.9 | For any tool whose source file cannot be obtained from the API, the snapshot MUST record a `sourceUnavailable: true` flag in the tool's metadata so that the restore path can warn the builder rather than silently failing. |
 | FR-1.10 | The capture pipeline MUST be fully transparent: it MUST NOT alter any request or response observed by the wxO UI in any way. |
 | FR-1.11 | The assembler MUST debounce snapshot saves; the debounce window MUST default to 3 seconds after the last captured event and MUST be user-configurable. |
-| FR-1.12 | The background service worker MUST track the most recently observed IBM IAM bearer token in ephemeral memory (never persisted to any storage) for use in proactive tool fetching (FR-1.8). |
+| FR-1.12 | The background service worker MUST track the most recently observed `x-ibm-wo-csrf` header value in ephemeral memory (never persisted to any storage). ~~This is an IBM IAM bearer token~~ — **correction**: the wxO SaaS UI authenticates via session cookie plus `x-ibm-wo-csrf` header; there is no `Authorization: Bearer` header on UI requests. The CSRF token is session-scoped only and is captured solely for use in any proactive assembler API calls within the same browser session. |
+| FR-1.13 | The following high-frequency polling endpoints MUST NOT be captured: `GET .../agents/{uuid}/environment`, `GET .../knowledge-bases/{uuid}/status`. Capturing them would generate excessive noise with no useful snapshot data. |
 
 ---
 
@@ -166,11 +179,12 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 | ID | Requirement |
 |---|---|
 | FR-2.1 | The extension MUST NEVER capture, store, log, or transmit credential values. This includes API keys, bearer tokens, passwords, client secrets, OAuth tokens, and any value stored under a key matching the credential pattern (see FR-2.4). |
-| FR-2.2 | Connection artefacts MUST be captured as metadata only: `app_id` (the connection name/identifier), `kind` (the authentication scheme type, e.g. `API_KEY_AUTH`, `BASIC_AUTH`, `BEARER_TOKEN`), and `server_url` if present. All other connection fields MUST be dropped. |
+| FR-2.2 | Connection artefacts MUST be captured as metadata only: `app_id` (the connection name/identifier), `kind` (the authentication scheme type — see FR-2.6), and `server_url` if present. All other connection fields MUST be dropped. |
 | FR-2.3 | A credential scrubber MUST run on every captured payload before the payload is stored, emitted, or forwarded. The scrubber MUST be applied in both the content script (first pass) and the background service worker (second pass, defence-in-depth). |
 | FR-2.4 | The scrubber MUST redact any key (case-insensitive, ignoring `-` and `_` separators) that matches: `api_key`, `apikey`, `token`, `password`, `passwd`, `client_secret`, `clientsecret`, `auth_config`, `authorization`, `secret`, `access_token`, `refresh_token`, `id_token`, `private_key`, `credential`, `credentials`. |
 | FR-2.5 | The local proxy MUST read storage credentials exclusively from environment variables or a local config file on the proxy host machine — never from the extension, the browser, or any network-transmitted payload. |
-| FR-2.6 | The proxy CORS configuration MUST restrict requests to the extension's own origin (`chrome-extension://{extension-id}`) only. |
+| FR-2.6 | The connection `kind` field MUST be populated from the `security_scheme` field of the connections API response (confirmed values: `api_key_auth`, `basic_auth`, `bearer_token`, `key_value_creds`, `oauth2`). For MCP toolkit connections, `security_scheme` is `null` and `kind` MUST be recorded as an empty string — the `server_url` field still provides meaningful restore context in this case. |
+| FR-2.7 | The proxy CORS configuration MUST restrict requests to the extension's own origin (`chrome-extension://{extension-id}`) only. |
 
 ---
 
@@ -297,11 +311,11 @@ connections/
 |---|---|
 | SEC-1 | Credential data (API keys, bearer tokens, passwords, OAuth secrets) MUST NEVER appear in any snapshot zip, extension storage, log file, or network transmission. |
 | SEC-2 | The credential scrubber MUST be applied at two independent points in the pipeline (content script and background service worker) as a defence-in-depth measure. |
-| SEC-3 | The IBM IAM bearer token observed from wxO requests MUST be stored only in the background service worker's in-memory state. It MUST NOT be written to `chrome.storage`, transmitted to the proxy, or included in any log. |
+| SEC-3 | The `x-ibm-wo-csrf` header value observed from wxO requests MUST be stored only in the background service worker's in-memory state. It MUST NOT be written to `chrome.storage`, transmitted to the proxy, or included in any log. ~~(Previously described as an IBM IAM bearer token — corrected in v1.1; the wxO SaaS UI does not use Authorization: Bearer.)~~ |
 | SEC-4 | The local proxy MUST NOT accept requests from any origin other than the extension itself (enforced via CORS `chrome-extension://{extension-id}`). |
 | SEC-5 | Storage credentials MUST be supplied to the proxy exclusively via environment variables or a local config file on the proxy's host machine. |
 | SEC-6 | The proxy MUST validate the structure of every received zip before unpacking it, to defend against path traversal attacks in malformed zip archives. |
-| SEC-7 | The extension MUST request only the minimum Chrome permissions necessary: `storage`, `tabs`, `webRequest`, and `host_permissions` scoped to the wxO SaaS hostname and `localhost`. |
+| SEC-7 | The extension MUST request only the minimum Chrome permissions necessary: `storage`, `tabs`, `webRequest`, and `host_permissions` scoped to `*://*.watson-orchestrate.cloud.ibm.com/*` and `http://localhost/*`. |
 
 ---
 
@@ -309,33 +323,109 @@ connections/
 
 | Constraint | Detail |
 |---|---|
-| **Chrome Manifest V3** | MV3 service workers cannot use `XMLHttpRequest` or read response bodies directly via `webRequest`. The content script `window.fetch` interceptor is the primary mechanism for response body capture. `webRequest.onBeforeRequest` with `requestBody` is used exclusively for multipart POST body capture. |
-| **No response body in webRequest (MV3)** | Unlike MV3, the older `webRequestBlocking` API is not available to ordinary extensions. The content script fetch interceptor is the only standards-compliant path for response body capture. |
+| **Chrome Manifest V3** | MV3 service workers cannot use `XMLHttpRequest` or read response bodies directly via `webRequest`. The content script `window.fetch` interceptor is the primary mechanism for response body capture. `webRequest.onBeforeRequest` with `requestBody` is used for multipart request body capture (both POST and PUT). |
+| **No response body in webRequest (MV3)** | Unlike MV2, the `webRequestBlocking` API is not available to ordinary MV3 extensions. The content script fetch interceptor is the only standards-compliant path for response body capture. |
 | **Proxy is always local** | The proxy runs on the builder's own machine. It is not a cloud service. Builders must run the proxy process themselves. |
 | **ADK CLI dependency** | Restore operations require the IBM watsonx Orchestrate ADK CLI to be installed and authenticated on the same machine as the proxy. The proxy shells out to the CLI. |
-| **Source file availability** | The wxO API may not return original source files (Python `.py`, OpenAPI `.yaml`) in GET responses for pre-existing tools. In these cases the snapshot records what is available and flags `sourceUnavailable: true`. |
+| **Source file availability** | Catalog tools added via the wxO UI are created from a pre-signed S3 URL; the source file is never transmitted to the `mfe_builder` API. Hand-crafted Python/OpenAPI tools uploaded as multipart form data CAN be captured. In all cases, if source is not available the snapshot flags `sourceUnavailable: true`. |
 | **Connection credentials** | By design, connection credential values are never captured. After a restore, the builder must re-enter credentials via the wxO UI or CLI. The restore system creates the connection shape only. |
 | **Single active agent session** | v1 captures one active agent at a time. Multiple concurrent agent builder sessions in different tabs are not supported. |
+| **KB create is a single atomic request** | Creating a new knowledge base and uploading the first document happens in a single `POST /v1/orchestrate/knowledge-bases/documents` multipart request. The KB UUID is not known until the `201` response body arrives. The assembler must buffer the captured file bytes and correlate them with the UUID from the response. |
 
 ---
 
 ## 10. Open Decisions
 
-The following decisions require resolution before or during implementation. Community input is welcome via GitHub Issues.
-
 | ID | Decision | Options | Notes |
 |---|---|---|---|
 | OD-1 | **Proxy server technology** | Node.js/Express, Python/FastAPI, Go/chi | No functional dependency on choice; pick based on contributor preference |
-| OD-2 | **Response body interception strategy** | Content script `window.fetch` override (current) vs. offscreen document vs. other | Content script fetch override is the current design; confirm this holds against CSP policies on the wxO SaaS domain |
+| OD-2 | **Response body interception strategy** | Content script `window.fetch` override (current) vs. offscreen document vs. other | Content script fetch override is the confirmed design; validated against 4 HAR recordings on `us-south.watson-orchestrate.cloud.ibm.com` |
 | OD-3 | **Proxy authentication** | None (localhost only) vs. shared-secret request header | Localhost-only is sufficient for v1; a shared secret may be warranted for teams sharing a proxy over a local network |
-| OD-4 | **Google Drive OAuth flow UX** | CLI-based browser-open + localhost callback vs. manual copy-paste code | The proxy could open the browser automatically (`open`/`xdg-open`) or print the URL for the user to visit; the callback could be a temporary localhost HTTP listener or a manual code entry prompt — choose based on contributor preference |
-| OD-7 | **Google Drive shared drives** | Personal Drive only vs. also support Shared Drives | Shared Drives require a `driveId` parameter in the Drive API; v1 can target personal Drive only and add Shared Drive support later |
-| OD-5 | **wxO API endpoint verification** | Paths in these requirements are derived from ADK documentation and DevTools inspection; they require confirmation against a live wxO SaaS session before Sub-Task 2 implementation finalises | A contributor with wxO SaaS access should verify the endpoint list and open an Issue if any paths differ |
-| OD-6 | **Extension distribution** | Side-load only (current) vs. Chrome Web Store for v2 | Side-load is sufficient for v1; Web Store submission is a future consideration |
+| OD-4 | **Google Drive OAuth flow UX** | CLI-based browser-open + localhost callback vs. manual copy-paste code | The proxy could open the browser automatically (`open`/`xdg-open`) or print the URL for the user to visit |
+| OD-5 | **wxO API endpoint verification** | ~~Paths require confirmation~~ | **Resolved in v1.1.** All endpoint paths confirmed against 4 live HAR recordings on `us-south.watson-orchestrate.cloud.ibm.com` (Aug 2026). |
+| OD-6 | **Extension distribution** | Side-load only (current) vs. Chrome Web Store for v2 | Side-load is sufficient for v1 |
+| OD-7 | **Google Drive shared drives** | Personal Drive only vs. also support Shared Drives | v1 targets personal Drive only |
 
 ---
 
-## 11. Glossary
+## 11. Deviations from v1.0 — Confirmed by HAR Analysis
+
+> **Background:** The v1.0 requirements were written against ADK documentation and plan assumptions. After analysing 4 live HAR recordings from a real wxO SaaS session (`us-south.watson-orchestrate.cloud.ibm.com`, Aug 2026), several assumptions were found to be incorrect. This section records every deviation so contributors and reviewers can understand what changed and why.
+
+### 11.1 Authentication model
+
+| v1.0 assumption | v1.1 confirmed reality |
+|---|---|
+| wxO UI authenticates via `Authorization: Bearer <IBM-IAM-token>` header on API requests | wxO UI authenticates via **session cookie + `x-ibm-wo-csrf` header**. There is NO `Authorization: Bearer` header on any `mfe_builder` API request. |
+| FR-1.12 and SEC-3 referred to "IBM IAM bearer token" | Updated to refer to CSRF token. The token is session-scoped only and suitable for same-session proactive fetches, but NOT a persistent API key. |
+
+**Impact:** The `BEARER_TOKEN_OBSERVED` message type name is retained for backward compatibility but its payload carries the CSRF token value, not a bearer token. The assembler design is unchanged — it still stores the most recent captured token for same-session proactive API calls.
+
+---
+
+### 11.2 API endpoint paths — complete mapping
+
+All `mfe_builder` API paths were either wrong or missing in v1.0. Confirmed values:
+
+| Resource | v1.0 path (wrong) | v1.1 confirmed path |
+|---|---|---|
+| Agent list | `GET /v2/orchestrate/agents/unified` | `GET /mfe_builder/api/v2/builder/agents` |
+| Agent detail | `GET /v2/orchestrate/agents/{id}` | `GET /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}` |
+| Agent save | *(not captured)* | **`PATCH /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}`** — this is the richest capture point; response body includes `toolsSelected[]` with full tool binding |
+| Tool list/batch | `GET /v2/orchestrate/tools` | `GET /mfe_builder/api/v2/builder/tools?ids={uuid}&ids={uuid}&...` — bare JSON array response |
+| Tool detail | `GET /v2/orchestrate/tools/{id}` | *(subsumed by PATCH toolsSelected — individual tool GETs not needed)* |
+| Tool create (catalog) | `POST /v2/orchestrate/tools` (multipart) | `POST /mfe_builder/api/v1/builder/tools/create-from-template` — **JSON body, not multipart; source file not capturable** |
+| Tool upload (hand-crafted) | `POST /v2/orchestrate/tools` (multipart) | `POST /mfe_builder/api/v2/builder/tools` (multipart — same intent, different path) |
+| Connections | `GET /v2/orchestrate/connections` | `GET /mfe_builder/api/v1/orchestrate/connections/applications` |
+| Connection detail | `GET /v2/orchestrate/connections/{id}` | *(subsumed by list — individual connection GETs not needed)* |
+| KB list | `GET /v2/orchestrate/knowledge-bases` | *(no list endpoint observed; detail is captured per-KB)* |
+| KB detail | `GET /v2/orchestrate/knowledge-bases/{id}` | `GET /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}` — **v1/orchestrate, not v2/builder** |
+| KB create | *(not modelled)* | `POST /mfe_builder/api/v1/orchestrate/knowledge-bases/documents` — creates KB **and** uploads first document in one multipart request |
+| KB upload | `POST /v2/orchestrate/knowledge-bases/{id}/documents` | `PUT /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}/documents` — **method is PUT, not POST; v1/orchestrate, not v2/builder** |
+
+---
+
+### 11.3 Connection response envelope
+
+| v1.0 assumption | v1.1 confirmed reality |
+|---|---|
+| Connections response wrapped as `{ resources: [...] }` | Response is `{ tenant_id, page, limit, total, **applications**: [...] }` |
+| Connection `kind` read from a `kind` or `type` field | Connection authentication scheme read from `security_scheme` field (e.g. `"api_key_auth"`, `"oauth2"`). `auth_type` is always `""` for non-OAuth connections. MCP toolkit connections have `security_scheme: null`. |
+
+**Impact:** A bug in the content script's `CONNECTION_CAPTURED` handler (iterating `data["resources"]` instead of `data["applications"]`) was found and fixed during validation testing.
+
+---
+
+### 11.4 Agent PATCH as primary snapshot trigger
+
+| v1.0 assumption | v1.1 confirmed reality |
+|---|---|
+| Agent detail comes only from GET responses; tool binding requires separate tool GET calls | `PATCH /v1/builder/orchestrate/agents/{uuid}` response body contains `toolsSelected[]` with **complete binding objects** for all tools (including `binding.python.connections` / `binding.mcp.connections` maps). This is the richest single capture point. |
+| FR-1.8 required proactive tool fetching for all pre-existing tools | **Proactive fetching is the fallback only**, not the primary path. The PATCH `toolsSelected[]` eliminates the need for proactive fetches in the common case (user saves agent). Proactive fetching is only required if the assembler needs tool details before the user performs a save. |
+
+---
+
+### 11.5 KB create atomicity
+
+| v1.0 assumption | v1.1 confirmed reality |
+|---|---|
+| KB creation and document upload are separate API calls | KB creation and first document upload are a **single atomic `POST /knowledge-bases/documents` multipart request**. The KB UUID is not in the URL — it is returned in the `201` response body as `{ knowledge_base: "<uuid>", ... }`. |
+
+**Impact:** The assembler must buffer `KB_FILE_CAPTURED` events with `kbId: ""` (emitted from the create POST) and back-fill the UUID when the `201` response is processed. Subsequent additional uploads use `PUT /{uuid}/documents` and carry the UUID in the URL.
+
+---
+
+### 11.6 wxO SaaS hostname
+
+| v1.0 assumption | v1.1 confirmed reality |
+|---|---|
+| `*.watson-orchestrate.ibm.com` | **`*.watson-orchestrate.cloud.ibm.com`** |
+
+**Impact:** `manifest.json` `host_permissions`, content script `matches`, and `webRequest` URL filter patterns have all been updated. The shared constant `WXO_HOSTNAME` in `src/shared/index.ts` is corrected.
+
+---
+
+## 12. Glossary
 
 | Term | Definition |
 |---|---|
@@ -343,34 +433,36 @@ The following decisions require resolution before or during implementation. Comm
 | **Agent Artefact** | Any resource associated with an agent: the agent definition itself, its tools, its knowledge bases, and its connections |
 | **app_id** | The identifier for a wxO connection object. Tools reference connections by `app_id`. It is the connection name, not a credential. |
 | **COS** | IBM Cloud Object Storage — the default S3-compatible blob storage target for snapshot zips |
-| **Google Drive adapter** | The storage adapter implementation that stores snapshot zips as files in a user's Google Drive, organised under an `wxo-autosave/` folder hierarchy, using the Google Drive API v3 with OAuth 2.0 |
-| **OAuth 2.0 authorization code flow** | The three-legged OAuth flow used by the Google Drive adapter: the proxy generates an authorization URL, the user grants access in the browser, and the proxy exchanges the returned code for access and refresh tokens |
-| **Storage adapter interface** | The abstract interface all storage backends implement, defining `upload`, `download`, `list`, and `delete` operations; the proxy's business logic depends only on this interface |
+| **CSRF token** | The `x-ibm-wo-csrf` header value sent with every wxO SaaS UI API request. This is the session authentication mechanism (alongside a session cookie). It is NOT an IBM IAM bearer token and is session-scoped only. |
+| **Google Drive adapter** | The storage adapter implementation that stores snapshot zips as files in a user's Google Drive, organised under a `wxo-autosave/` folder hierarchy, using the Google Drive API v3 with OAuth 2.0 |
+| **OAuth 2.0 authorization code flow** | The three-legged OAuth flow used by the Google Drive adapter |
+| **Storage adapter interface** | The abstract interface all storage backends implement, defining `upload`, `download`, `list`, and `delete` operations |
 | **Content Script** | A JavaScript file injected by the extension into the wxO Agent Builder page, with access to the page's DOM and JavaScript context, including `window.fetch` |
-| **Debounce** | A technique that delays an action until a specified period of inactivity has passed, preventing a flood of identical operations |
-| **expectedCredentials** | Metadata embedded in a tool definition that names the connection (`app_id`) and credential type a tool requires at runtime |
-| **kind** | The authentication scheme type of a wxO connection (e.g. `API_KEY_AUTH`, `BASIC_AUTH`, `BEARER_TOKEN`, `OAUTH_CLIENT_CREDENTIALS`) |
-| **MV3** | Chrome Extension Manifest Version 3 — the current extension format that replaces MV2; it uses a service worker instead of a background page |
-| **Proactive fetch** | When the assembler detects that a referenced tool has not been captured in the current session, it issues an authenticated API request to capture that tool's details |
+| **Debounce** | A technique that delays an action until a specified period of inactivity has passed |
+| **kind** | The authentication scheme type of a wxO connection, sourced from the `security_scheme` field in the connections API response (e.g. `api_key_auth`, `basic_auth`, `bearer_token`, `key_value_creds`, `oauth2`). Empty string for MCP toolkit connections where `security_scheme` is null. |
+| **MV3** | Chrome Extension Manifest Version 3 |
+| **Proactive fetch** | When the assembler detects that a referenced tool has not been captured in the current session before a PATCH fires, it may issue an authenticated API request using the session CSRF token to capture that tool's details. This is a fallback path — the PATCH `toolsSelected[]` covers the common case. |
 | **Proxy server** | A local HTTP server (runs on the builder's machine) that holds storage credentials or OAuth tokens, accepts snapshots from the extension, and executes restores via the ADK CLI |
 | **Scrubber** | A pure function that removes credential values from a captured payload before it is stored, emitted, or transmitted |
+| **security_scheme** | The field name in the wxO connections API response (`/v1/orchestrate/connections/applications`) that identifies the authentication type. Used as the `kind` value in captured connection metadata. |
 | **Service Worker (MV3)** | The background execution context for a Manifest V3 Chrome extension; it is ephemeral and may be suspended by the browser at any time |
 | **Snapshot** | A complete, versioned zip archive of all artefacts associated with a single agent at a point in time |
-| **sourceUnavailable** | A flag set on a tool's metadata when the API does not return the original source file (Python or OpenAPI spec); the tool metadata is captured but it cannot be fully restored |
-| **Tenant** | The wxO SaaS organisation identifier, extracted from the browser tab URL or agent API response |
+| **sourceUnavailable** | A flag set on a tool's metadata when the source file is not capturable (catalog tools added via UI, or pre-existing tools where the API does not return source). The tool metadata is still captured but it cannot be fully restored without the source. |
+| **Tenant** | The wxO SaaS organisation identifier, extracted from the captured agent payload (`tenant_id` field) |
+| **toolsSelected** | A field present in the `PATCH /v1/builder/orchestrate/agents/{uuid}` request body that contains full tool objects with binding information. This is the primary source of tool binding data for the assembler. |
 | **wxO** | IBM watsonx Orchestrate — the AI agent platform whose Agent Builder UI is the target of this project |
 
 ---
 
-## 12. Contributing
+## 13. Contributing
 
 This project is open to community contributions. Here are the best ways to help:
 
 ### Good First Issues
-- **Verify wxO API endpoint paths** against a live SaaS session and open an Issue with confirmed paths (OD-5)
-- **Implement the zip serialiser** (`buildZip` / `parseZip` with `fflate`) — the interface is specified in FR-3, the format in FR-3.1
-- **Implement the Snapshot Assembler** in the background service worker — the design is specified in the plan file (`wxo-autosave-extension-plan.md`, Sub-Task 3)
+- **Implement the zip serialiser** (`buildZip` / `parseZip` with `fflate`) — interface specified in FR-3, format in FR-3.1
+- **Implement the Snapshot Assembler** in the background service worker — design specified in `wxo-autosave-extension-plan.md`, Sub-Task 3
 - **Choose and scaffold the proxy server** (OD-1) — Node/Express, Python/FastAPI, or Go/chi are all welcome
+- **Implement the storage adapter interface** — IBM COS adapter (FR-4.5) is the priority first adapter
 
 ### How to Contribute
 1. **Fork** this repository
@@ -397,10 +489,11 @@ wxo-ui-agent-autosave/        # Chrome/Edge extension (TypeScript, Vite, MV3)
       messages.ts             # Typed internal message schema
       scrubber.ts             # Credential scrubber (pure, tested)
       multipart.ts            # Multipart decoder (pure, tested)
+      index.ts                # AgentSnapshot type + shared constants
   wxo-autosave-extension-plan.md   # Detailed implementation plan with sub-tasks
 wxo-agent-backup-recovery-requirements.md   # This file
 ```
 
 ---
 
-*Requirements document generated from planning sessions. For questions, open a GitHub Issue.*
+*Requirements document v1.1 — updated from HAR analysis sessions (Aug 2026). For questions, open a GitHub Issue.*
