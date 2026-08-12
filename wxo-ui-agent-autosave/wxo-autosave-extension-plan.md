@@ -272,7 +272,9 @@ inactivity. This prevents a flood of network saves for every individual field ed
 - `AgentSnapshot` is now defined in `src/shared/index.ts` and the assembler is implemented in `src/background/assembler.ts`
 - Agent PATCH with `toolsSelected[]` is the primary snapshot trigger, reducing the need for proactive tool detail fetching in the common path
 - The current implementation persists in-flight assembly state in `chrome.storage.session`
-- The current implementation does **not yet** emit `SNAPSHOT_READY` on the internal bus, serialise zips, POST to the proxy, or maintain the recent-snapshot index in `chrome.storage.local`
+- `SNAPSHOT_READY` bus emission is now implemented (commit `2856cad`)
+- Zip serialisation is now implemented via `src/shared/zip.ts` (Sub-Task 4 complete)
+- The current implementation does **not yet** POST to the proxy or maintain the recent-snapshot index in `chrome.storage.local`
 
 ---
 
