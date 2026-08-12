@@ -373,7 +373,14 @@ them browse snapshot history and initiate a restore.
   through `chrome.runtime.sendMessage` / `chrome.storage`
 - Keep the popup bundle small — it has no access to Node APIs
 
-**Status:** [ ] pending
+**Status:** [x] done
+
+**Recorded deviations from original draft:**
+- Settings stored in `chrome.storage.sync` via `src/shared/settings.ts` (`PopupSettings`: `proxyPort`, `debounceMs`, `bucketPrefix`)
+- Assembler now reads `proxyPort` from `chrome.storage.sync` before each proxy POST instead of using the hardcoded constant
+- Restore flow is complete in the popup: preflight → credentials checklist overlay → confirm → streaming progress; proxy-offline state handled gracefully throughout
+- Snapshot history prefers the live proxy list (`GET /snapshots?agent=&tenant=`) and falls back to `chrome.storage.local` index with the offline banner shown
+- Progress stream expects line-delimited JSON from the proxy (`{ artefact, status, message }`) but degrades gracefully to a single accepted message if the proxy sends a non-streaming body
 
 ---
 

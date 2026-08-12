@@ -1,4 +1,4 @@
-/* popup.css — minimal scaffold styles */
+/* popup.css — Sub-Task 5 full styles */
 
 *,
 *::before,
@@ -14,9 +14,11 @@ body {
   line-height: 1.5;
   color: #1f2328;
   background: #ffffff;
-  width: 320px;
+  width: 340px;
   min-height: 120px;
 }
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
 
 .header {
   display: flex;
@@ -33,33 +35,336 @@ body {
   color: #1f2328;
 }
 
-.version {
-  font-size: 11px;
+.header-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 15px;
   color: #57606a;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
 }
 
-.status-card {
-  padding: 16px 14px;
+.icon-btn:hover {
+  background: #e5e7eb;
+  color: #1f2328;
 }
 
-.status-label {
+/* ── Banner ─────────────────────────────────────────────────────────────────── */
+
+.banner {
+  padding: 7px 14px;
+  font-size: 12px;
+}
+
+.banner--warn {
+  background: #fff8e1;
+  color: #7a5c00;
+  border-bottom: 1px solid #ffe082;
+}
+
+/* ── Cards ──────────────────────────────────────────────────────────────────── */
+
+.card {
+  padding: 12px 14px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.card-label {
   font-size: 11px;
   color: #57606a;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+/* ── Session card ───────────────────────────────────────────────────────────── */
+
+.session-agent {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2328;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d0d7de;
+  flex-shrink: 0;
+}
+
+.status-dot--saving { background: #f0a730; }
+.status-dot--saved  { background: #26a148; }
+.status-dot--error  { background: #cf222e; }
+
+.session-status {
+  font-size: 12px;
+  color: #57606a;
+}
+
+.session-saved {
+  font-size: 11px;
+  color: #57606a;
+}
+
+/* ── Snapshot list ──────────────────────────────────────────────────────────── */
+
+.card--list {
+  padding-bottom: 4px;
+}
+
+.snapshot-list {
+  list-style: none;
+}
+
+.snapshot-empty {
+  font-size: 12px;
+  color: #57606a;
+  padding: 4px 0 8px;
+}
+
+.snapshot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-top: 1px solid #f0f0f0;
+  gap: 8px;
+}
+
+.snapshot-row:first-child {
+  border-top: none;
+}
+
+.snapshot-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.snapshot-agent {
+  font-size: 12px;
+  font-weight: 500;
+  color: #1f2328;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.snapshot-time {
+  font-size: 11px;
+  color: #57606a;
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+
+.btn {
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+.btn--primary {
+  background: #3b82d4;
+  color: #ffffff;
+}
+
+.btn--primary:hover {
+  background: #2c6dbf;
+}
+
+.btn--primary:disabled {
+  background: #d0d7de;
+  cursor: not-allowed;
+}
+
+.btn--ghost {
+  background: #f7f8fa;
+  color: #1f2328;
+  border: 1px solid #e5e7eb;
+}
+
+.btn--ghost:hover {
+  background: #e5e7eb;
+}
+
+.btn--restore {
+  background: #f7f8fa;
+  color: #3b82d4;
+  border: 1px solid #cce0ff;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.btn--restore:hover {
+  background: #e8f0fc;
+}
+
+.btn--restore:disabled {
+  color: #57606a;
+  border-color: #e5e7eb;
+  cursor: not-allowed;
+}
+
+/* ── Overlay ────────────────────────────────────────────────────────────────── */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.96);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 40px;
+  z-index: 10;
+}
+
+.overlay-box {
+  width: 100%;
+  max-width: 310px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.10);
+}
+
+.overlay-title {
+  font-size: 14px;
+  font-weight: 600;
   margin-bottom: 4px;
 }
 
-.status-value {
-  font-size: 14px;
-  font-weight: 500;
-  color: #1f2328;
-}
-
-.footer {
-  padding: 8px 14px;
+.overlay-subtitle {
   font-size: 11px;
   color: #57606a;
+  margin-bottom: 12px;
+  word-break: break-all;
+}
+
+.overlay-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #1f2328;
+  margin: 10px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.overlay-section-label--warn {
+  color: #cf222e;
+}
+
+.preflight-list {
+  list-style: none;
+  padding-left: 4px;
+}
+
+.preflight-list li {
+  font-size: 12px;
+  color: #1f2328;
+  padding: 2px 0;
+}
+
+.preflight-list--warn li {
+  color: #cf222e;
+}
+
+.overlay-note {
+  font-size: 11px;
+  color: #57606a;
+  margin-top: 12px;
+  padding-top: 10px;
   border-top: 1px solid #e5e7eb;
-  text-align: center;
+}
+
+.overlay-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ── Progress list ──────────────────────────────────────────────────────────── */
+
+.progress-list {
+  list-style: none;
+  margin-top: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.progress-list li {
+  font-size: 12px;
+  color: #1f2328;
+  padding: 3px 0;
+}
+
+.progress-list li.ok    { color: #26a148; }
+.progress-list li.error { color: #cf222e; }
+.progress-list li.skip  { color: #57606a; }
+
+/* ── Settings panel ─────────────────────────────────────────────────────────── */
+
+.card--settings {
+  border-bottom: none;
+}
+
+.field {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.field-label {
+  display: block;
+  font-size: 11px;
+  color: #57606a;
+  margin-bottom: 3px;
+}
+
+.field-input {
+  width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: #1f2328;
+  background: #ffffff;
+  outline: none;
+}
+
+.field-input:focus {
+  border-color: #3b82d4;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.settings-saved-msg {
+  font-size: 12px;
+  color: #26a148;
 }

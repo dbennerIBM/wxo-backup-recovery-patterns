@@ -24,12 +24,12 @@ import type {
 import {
   DEBOUNCE_DEFAULT_MS,
   MAX_RECENT_SNAPSHOTS,
-  PROXY_DEFAULT_PORT,
   RECENT_SNAPSHOTS_KEY,
   SCHEMA_VERSION,
   type SnapshotReadyPayload,
 } from "../shared";
 import { buildZip } from "../shared/zip";
+import { mergeSettings, SETTINGS_STORAGE_KEY } from "../shared/settings";
 
 export type SnapshotEventType =
   | "AGENT_CAPTURED"
@@ -331,15 +331,19 @@ async function emitSnapshotReady(
     }
   }
 
+  // Read user-configured port; fall back to default if storage is empty.
+  const storedSettings = await chrome.storage.sync.get(SETTINGS_STORAGE_KEY);
+  const { proxyPort } = mergeSettings(storedSettings[SETTINGS_STORAGE_KEY]);
+
   // POST zip to local proxy; on success update the recent-snapshot index.
-  const ok = await postSnapshotToProxy(snapshot, PROXY_DEFAULT_PORT);
+  const ok = await postSnapshotToProxy(snapshot, proxyPort);
   if (ok) {
     const entry: RecentSnapshotEntry = {
       agentId,
       agentName: snapshot.agent.name,
       tenant: snapshot.tenant,
       capturedAt: snapshot.capturedAt,
-      proxyUrl: `http://localhost:${PROXY_DEFAULT_PORT}/snapshots`,
+      proxyUrl: `http://localhost:${proxyPort}/snapshots`,
     };
     await appendRecentSnapshot(entry);
     console.debug("[wxo-autosave] snapshot saved", agentId, snapshot.capturedAt);

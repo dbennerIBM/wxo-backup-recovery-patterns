@@ -8,18 +8,106 @@
   </head>
   <body>
     <div id="app">
+
+      <!-- ── Header ──────────────────────────────────────────────────────── -->
       <header class="header">
         <span class="logo">wxO Autosave</span>
-        <span class="version">v0.1.0</span>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-settings" aria-label="Settings" title="Settings">⚙</button>
+        </div>
       </header>
 
-      <main class="status-card">
-        <p class="status-label">Status</p>
-        <p class="status-value" id="status">Initialising…</p>
-      </main>
+      <!-- ── Proxy-offline banner (hidden by default) ─────────────────────── -->
+      <div class="banner banner--warn" id="banner-offline" hidden>
+        Proxy offline — showing cached history. Restore unavailable.
+      </div>
 
-      <footer class="footer">Sub-Task 2 will add full UI</footer>
-    </div>
+      <!-- ── Current session card ──────────────────────────────────────────── -->
+      <section class="card" id="section-session">
+        <p class="card-label">Current session</p>
+        <p class="session-agent" id="session-agent">—</p>
+        <div class="session-meta">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="session-status" id="session-status">No activity yet</span>
+        </div>
+        <p class="session-saved" id="session-saved"></p>
+      </section>
+
+      <!-- ── Snapshot history ───────────────────────────────────────────────── -->
+      <section class="card card--list" id="section-history">
+        <p class="card-label">Recent snapshots</p>
+        <ul class="snapshot-list" id="snapshot-list">
+          <li class="snapshot-empty" id="snapshot-empty">No snapshots yet.</li>
+        </ul>
+      </section>
+
+      <!-- ── Restore preflight overlay (hidden by default) ─────────────────── -->
+      <div class="overlay" id="overlay-preflight" hidden>
+        <div class="overlay-box">
+          <p class="overlay-title">Before restoring…</p>
+          <p class="overlay-subtitle" id="preflight-key"></p>
+
+          <div id="preflight-connections-section" hidden>
+            <p class="overlay-section-label">Connections to re-credential after restore:</p>
+            <ul class="preflight-list" id="preflight-connections"></ul>
+          </div>
+
+          <div id="preflight-unavailable-section" hidden>
+            <p class="overlay-section-label overlay-section-label--warn">
+              Tools with unavailable source (will be skipped):
+            </p>
+            <ul class="preflight-list preflight-list--warn" id="preflight-unavailable"></ul>
+          </div>
+
+          <p class="overlay-note">
+            Credentials are never stored by this extension — you will need to
+            re-enter them in the wxO UI after the restore completes.
+          </p>
+
+          <div class="overlay-actions">
+            <button class="btn btn--primary" id="btn-confirm-restore">Restore</button>
+            <button class="btn btn--ghost" id="btn-cancel-restore">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Restore progress overlay (hidden by default) ──────────────────── -->
+      <div class="overlay" id="overlay-progress" hidden>
+        <div class="overlay-box">
+          <p class="overlay-title" id="progress-title">Restoring…</p>
+          <ul class="progress-list" id="progress-list"></ul>
+          <div class="overlay-actions" id="progress-actions" hidden>
+            <button class="btn btn--ghost" id="btn-close-progress">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Settings panel (hidden by default) ────────────────────────────── -->
+      <section class="card card--settings" id="section-settings" hidden>
+        <p class="card-label">Settings</p>
+
+        <label class="field">
+          <span class="field-label">Proxy port</span>
+          <input class="field-input" id="setting-port" type="number" min="1" max="65535" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Debounce delay (seconds)</span>
+          <input class="field-input" id="setting-debounce" type="number" min="0" max="30" step="0.5" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Bucket path prefix</span>
+          <input class="field-input" id="setting-prefix" type="text" placeholder="e.g. my-org/prod" />
+        </label>
+
+        <div class="settings-actions">
+          <button class="btn btn--primary" id="btn-save-settings">Save</button>
+          <span class="settings-saved-msg" id="settings-saved-msg" hidden>Saved.</span>
+        </div>
+      </section>
+
+    </div><!-- /#app -->
     <script type="module" src="./popup.ts"></script>
   </body>
 </html>
