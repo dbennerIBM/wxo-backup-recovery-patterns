@@ -20,14 +20,19 @@ import type {
   KBMetaPayload,
   ToolPayload,
 } from "../shared/messages";
-import { DEBOUNCE_DEFAULT_MS, SCHEMA_VERSION } from "../shared";
+import {
+  DEBOUNCE_DEFAULT_MS,
+  SCHEMA_VERSION,
+  type SnapshotReadyPayload,
+} from "../shared";
 
 export type SnapshotEventType =
   | "AGENT_CAPTURED"
   | "TOOL_CAPTURED"
   | "CONNECTION_CAPTURED"
   | "KB_META_CAPTURED"
-  | "KB_FILE_CAPTURED";
+  | "KB_FILE_CAPTURED"
+  | "SNAPSHOT_READY";
 
 export interface SnapshotAssemblerEvents {
   on<T extends SnapshotEventType>(
@@ -38,9 +43,11 @@ export interface SnapshotAssemblerEvents {
         : T extends "TOOL_CAPTURED" ? ToolPayload
         : T extends "CONNECTION_CAPTURED" ? ConnectionPayload
         : T extends "KB_META_CAPTURED" ? KBMetaPayload
-        : KBFilePayload,
+        : T extends "KB_FILE_CAPTURED" ? KBFilePayload
+        : SnapshotReadyPayload,
     ) => void,
   ): void;
+  emit(type: "SNAPSHOT_READY", payload: SnapshotReadyPayload): void;
 }
 
 const SNAPSHOT_STORAGE_KEY = "agentSnapshots";
@@ -245,7 +252,15 @@ function toSnapshotFile(payload: KBFilePayload): SnapshotFile {
   };
 }
 
-function emitSnapshotReady(agentId: string, snapshot: AgentSnapshot): void {
+function emitSnapshotReady(
+  events: SnapshotAssemblerEvents,
+  agentId: string,
+  snapshot: AgentSnapshot,
+): void {
+  const payload: SnapshotReadyPayload = { agentId, snapshot };
+
+  events.emit("SNAPSHOT_READY", payload);
+
   for (const listener of snapshotReadyListeners) {
     try {
       listener(agentId, snapshot);
@@ -255,7 +270,10 @@ function emitSnapshotReady(agentId: string, snapshot: AgentSnapshot): void {
   }
 }
 
-function scheduleSnapshotReady(agentId: string): void {
+function scheduleSnapshotReady(
+  events: SnapshotAssemblerEvents,
+  agentId: string,
+): void {
   const timer = debounceTimers.get(agentId);
   if (timer !== undefined) {
     clearTimeout(timer);
@@ -266,7 +284,7 @@ function scheduleSnapshotReady(agentId: string): void {
     const snapshots = await readSnapshots();
     const snapshot = snapshots[agentId];
     if (!snapshot) return;
-    emitSnapshotReady(agentId, snapshot);
+    emitSnapshotReady(events, agentId, snapshot);
   }, DEBOUNCE_DEFAULT_MS);
 
   debounceTimers.set(agentId, nextTimer);
@@ -325,7 +343,10 @@ async function flushPendingKbFiles(agentId: string, kbIds: string[]): Promise<vo
   await Promise.all([writeSnapshots(snapshots), writePendingKbFiles(pending)]);
 }
 
-async function handleAgentCaptured(payload: AgentPayload): Promise<void> {
+async function handleAgentCaptured(
+  events: SnapshotAssemblerEvents,
+  payload: AgentPayload,
+): Promise<void> {
   const agentId = extractAgentId(payload.data);
   if (!agentId) return;
 
@@ -345,10 +366,13 @@ async function handleAgentCaptured(payload: AgentPayload): Promise<void> {
   });
 
   await flushPendingKbFiles(agentId, kbIds);
-  scheduleSnapshotReady(agentId);
+  scheduleSnapshotReady(events, agentId);
 }
 
-async function handleToolCaptured(payload: ToolPayload): Promise<void> {
+async function handleToolCaptured(
+  events: SnapshotAssemblerEvents,
+  payload: ToolPayload,
+): Promise<void> {
   const tools = extractToolsFromPayload(payload.data);
   if (tools.length === 0) return;
 
@@ -367,7 +391,7 @@ async function handleToolCaptured(payload: ToolPayload): Promise<void> {
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
     updated = true;
-    scheduleSnapshotReady(agentId);
+    scheduleSnapshotReady(events, agentId);
   }
 
   if (updated) {
@@ -375,7 +399,10 @@ async function handleToolCaptured(payload: ToolPayload): Promise<void> {
   }
 }
 
-async function handleConnectionCaptured(payload: ConnectionPayload): Promise<void> {
+async function handleConnectionCaptured(
+  events: SnapshotAssemblerEvents,
+  payload: ConnectionPayload,
+): Promise<void> {
   const snapshots = await readSnapshots();
   let updated = false;
 
@@ -405,7 +432,7 @@ async function handleConnectionCaptured(payload: ConnectionPayload): Promise<voi
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
     updated = true;
-    scheduleSnapshotReady(agentId);
+    scheduleSnapshotReady(events, agentId);
   }
 
   if (updated) {
@@ -413,7 +440,10 @@ async function handleConnectionCaptured(payload: ConnectionPayload): Promise<voi
   }
 }
 
-async function handleKbMetaCaptured(payload: KBMetaPayload): Promise<void> {
+async function handleKbMetaCaptured(
+  events: SnapshotAssemblerEvents,
+  payload: KBMetaPayload,
+): Promise<void> {
   const kbId = typeof payload.data["id"] === "string" ? payload.data["id"] : null;
   if (!kbId) return;
 
@@ -442,7 +472,7 @@ async function handleKbMetaCaptured(payload: KBMetaPayload): Promise<void> {
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
     updated = true;
-    scheduleSnapshotReady(agentId);
+    scheduleSnapshotReady(events, agentId);
   }
 
   if (updated) {
@@ -450,7 +480,10 @@ async function handleKbMetaCaptured(payload: KBMetaPayload): Promise<void> {
   }
 }
 
-async function handleKbFileCaptured(payload: KBFilePayload): Promise<void> {
+async function handleKbFileCaptured(
+  events: SnapshotAssemblerEvents,
+  payload: KBFilePayload,
+): Promise<void> {
   const file = toSnapshotFile(payload);
 
   if (payload.kbId === "") {
@@ -484,7 +517,7 @@ async function handleKbFileCaptured(payload: KBFilePayload): Promise<void> {
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
     updated = true;
-    scheduleSnapshotReady(agentId);
+    scheduleSnapshotReady(events, agentId);
   }
 
   if (updated) {
@@ -498,22 +531,22 @@ export function onSnapshotReady(listener: SnapshotReadyListener): void {
 
 export function registerAssembler(events: SnapshotAssemblerEvents): void {
   events.on("AGENT_CAPTURED", (payload) => {
-    void handleAgentCaptured(payload);
+    void handleAgentCaptured(events, payload);
   });
 
   events.on("TOOL_CAPTURED", (payload) => {
-    void handleToolCaptured(payload);
+    void handleToolCaptured(events, payload);
   });
 
   events.on("CONNECTION_CAPTURED", (payload) => {
-    void handleConnectionCaptured(payload);
+    void handleConnectionCaptured(events, payload);
   });
 
   events.on("KB_META_CAPTURED", (payload) => {
-    void handleKbMetaCaptured(payload);
+    void handleKbMetaCaptured(events, payload);
   });
 
   events.on("KB_FILE_CAPTURED", (payload) => {
-    void handleKbFileCaptured(payload);
+    void handleKbFileCaptured(events, payload);
   });
 }

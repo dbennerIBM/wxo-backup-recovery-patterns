@@ -343,6 +343,6 @@ chrome.runtime.onInstalled.addListener((details) => {
   console.log("[wxo-autosave] extension installed/updated:", details.reason);
 });
 
-registerAssembler({ on });
+registerAssembler({ on, emit });
 
 console.log("[wxo-autosave] background service worker initialised");

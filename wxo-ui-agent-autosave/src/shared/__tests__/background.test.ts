@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { scrubSecrets, scrubConnectionPayload } from "../scrubber";
 import { isExtensionMessage, type ExtensionMessage } from "../messages";
+import type { AgentSnapshot, SnapshotReadyPayload } from "../index";
 
 // ─── Inline pure-function extracts from background/index.ts ──────────────────
 // These are copy-extracted here because background/index.ts cannot be imported
@@ -514,5 +515,114 @@ describe("isExtensionMessage guard — rejects garbage at the chrome.runtime.onM
     for (const type of validTypes) {
       expect(isExtensionMessage({ type, payload: {} }), `should accept ${type}`).toBe(true);
     }
+  });
+});
+
+// ─── emitSnapshotReady — SNAPSHOT_READY bus emission ─────────────────────────
+// Extracted inline from assembler.ts to test without chrome.storage dependencies.
+
+interface TestSnapshotReadyBus {
+  emittedType: string | null;
+  emittedPayload: SnapshotReadyPayload | null;
+  emit(type: "SNAPSHOT_READY", payload: SnapshotReadyPayload): void;
+}
+
+function makeSnapshotReadyBus(): TestSnapshotReadyBus {
+  const bus: TestSnapshotReadyBus = {
+    emittedType: null,
+    emittedPayload: null,
+    emit(type, payload) {
+      bus.emittedType = type;
+      bus.emittedPayload = payload;
+    },
+  };
+  return bus;
+}
+
+function makeMinimalSnapshot(agentId: string): AgentSnapshot {
+  return {
+    schemaVersion: "1.0.0",
+    capturedAt: "2026-08-15T00:00:00.000Z",
+    tenant: "test-tenant",
+    agent: {
+      id: agentId,
+      name: "test-agent",
+      guidelines: [],
+      knowledge_base: [],
+      collaborators: [],
+      tags: [],
+      structured_output: null,
+    },
+    tools: [],
+    knowledgeBases: [],
+    connections: [],
+  };
+}
+
+/** Inline extract of emitSnapshotReady from assembler.ts (pure logic only). */
+function extractedEmitSnapshotReady(
+  bus: { emit(type: "SNAPSHOT_READY", payload: SnapshotReadyPayload): void },
+  legacyListeners: Array<(agentId: string, snapshot: AgentSnapshot) => void>,
+  agentId: string,
+  snapshot: AgentSnapshot,
+): void {
+  const payload: SnapshotReadyPayload = { agentId, snapshot };
+  bus.emit("SNAPSHOT_READY", payload);
+  for (const listener of legacyListeners) {
+    listener(agentId, snapshot);
+  }
+}
+
+describe("emitSnapshotReady — SNAPSHOT_READY payload shape and bus emission", () => {
+  it("emits SNAPSHOT_READY type on the bus", () => {
+    const bus = makeSnapshotReadyBus();
+    const snapshot = makeMinimalSnapshot("agent-42");
+    extractedEmitSnapshotReady(bus, [], "agent-42", snapshot);
+    expect(bus.emittedType).toBe("SNAPSHOT_READY");
+  });
+
+  it("payload contains the correct agentId", () => {
+    const bus = makeSnapshotReadyBus();
+    const snapshot = makeMinimalSnapshot("agent-42");
+    extractedEmitSnapshotReady(bus, [], "agent-42", snapshot);
+    expect(bus.emittedPayload!.agentId).toBe("agent-42");
+  });
+
+  it("payload contains the snapshot object", () => {
+    const bus = makeSnapshotReadyBus();
+    const snapshot = makeMinimalSnapshot("agent-42");
+    extractedEmitSnapshotReady(bus, [], "agent-42", snapshot);
+    expect(bus.emittedPayload!.snapshot).toBe(snapshot);
+  });
+
+  it("SnapshotReadyPayload shape — agentId is a string, snapshot is an object", () => {
+    const bus = makeSnapshotReadyBus();
+    const snapshot = makeMinimalSnapshot("shape-check");
+    extractedEmitSnapshotReady(bus, [], "shape-check", snapshot);
+    const p = bus.emittedPayload!;
+    expect(typeof p.agentId).toBe("string");
+    expect(typeof p.snapshot).toBe("object");
+    expect(p.snapshot).not.toBeNull();
+  });
+
+  it("legacy onSnapshotReady listeners are still called after bus emit", () => {
+    const bus = makeSnapshotReadyBus();
+    const snapshot = makeMinimalSnapshot("agent-99");
+    const legacyCalls: Array<{ agentId: string; snapshot: AgentSnapshot }> = [];
+    const listener = (agentId: string, s: AgentSnapshot) => legacyCalls.push({ agentId, snapshot: s });
+    extractedEmitSnapshotReady(bus, [listener], "agent-99", snapshot);
+    expect(bus.emittedType).toBe("SNAPSHOT_READY");
+    expect(legacyCalls).toHaveLength(1);
+    expect(legacyCalls[0]!.agentId).toBe("agent-99");
+  });
+
+  it("bus emit is called exactly once per invocation", () => {
+    let callCount = 0;
+    const countingBus = {
+      emit(_type: "SNAPSHOT_READY", _payload: SnapshotReadyPayload) { callCount++; },
+    };
+    const snapshot = makeMinimalSnapshot("agent-1");
+    extractedEmitSnapshotReady(countingBus, [], "agent-1", snapshot);
+    expect(callCount).toBe(1);
   });
 });
