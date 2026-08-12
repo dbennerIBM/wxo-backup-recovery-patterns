@@ -453,7 +453,17 @@ bucket, and serves the history list and restore trigger endpoints.
 - The restore import order matters: connections must exist before tools that depend on them, tools
   before the agent that references them, and KBs before the agent that references them
 
-**Status:** [ ] pending
+**Status:** [x] done — COS/S3/GCS adapter complete; Google Drive adapter deferred to follow-up
+
+**Recorded deviations from original draft:**
+- Proxy is a standalone package at `wxo-autosave-proxy/` (top-level repo sibling), not inside `src/proxy-server/`
+- Tech stack: Node.js built-in `node:http` (no Express/Fastify) — minimal dependencies
+- Storage adapter interface ships with one concrete implementation: `S3StorageAdapter` covering `cos`, `s3`, and `gcs` via `@aws-sdk/client-s3` with configurable endpoint
+- Google Drive adapter (`gdrive`) is reserved — `STORAGE_PROVIDER=gdrive` returns an unsupported error with a clear message
+- ADK CLI is validated at startup (fail-fast) rather than at restore time
+- `POST /restore` streams line-delimited JSON progress (`{ artefact, status, message }`) matching what `popup.ts` expects
+- Path traversal validation (SEC-6) is applied to every zip entry before any content is read
+- IBM COS `ibm-service-instance-id` header is injected via SDK middleware when `COS_INSTANCE_CRN` is set
 
 ---
 

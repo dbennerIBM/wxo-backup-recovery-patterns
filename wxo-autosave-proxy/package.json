@@ -1,0 +1,27 @@
+{
+  "name": "wxo-autosave-proxy",
+  "version": "0.1.0",
+  "description": "Local proxy server — receives snapshots from the wxO Autosave extension, stores them in IBM COS / AWS S3, and executes restores via the ADK CLI",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "build": "tsc --project tsconfig.json",
+    "start:compiled": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --max-warnings 0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "fflate": "^0.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.4.5",
+    "typescript-eslint": "^8.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
