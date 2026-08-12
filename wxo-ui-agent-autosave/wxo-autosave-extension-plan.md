@@ -501,7 +501,12 @@ before considering the project complete.
 - The wxO Developer Edition (local Docker) can be used for integration testing without a SaaS
   account
 
-**Status:** [ ] pending
+**Status:** [x] done
+
+**Recorded deviations from original draft:**
+- E2E validation requires a live wxO SaaS tenant and running proxy — automated unit tests cover all pure logic; the live scenarios are documented in `TESTING.md` at the repo root
+- Four proxy unit test files added: `zip.test.ts` (29 tests), `preflight.test.ts` (12 tests), `config.test.ts` (25 tests), `server.test.ts` (15 tests) — 81 tests total
+- `TESTING.md` documents four E2E scenarios: full round-trip, proxy offline, partial KB upload, catalog tool (sourceUnavailable), plus maintenance notes for wxO API endpoint changes
 
 ---
 

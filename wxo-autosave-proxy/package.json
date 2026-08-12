@@ -9,7 +9,9 @@
     "build": "tsc --project tsconfig.json",
     "start:compiled": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src --max-warnings 0"
+    "lint": "eslint src --max-warnings 0",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
@@ -19,7 +21,8 @@
     "@types/node": "^20.14.0",
     "eslint": "^9.0.0",
     "typescript": "^5.4.5",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=22"
