@@ -8,6 +8,7 @@
 import type {
   AgentSnapshot,
   ConnectionMeta,
+  RecentSnapshotEntry,
   SnapshotAgent,
   SnapshotFile,
   SnapshotKnowledgeBase,
@@ -22,9 +23,13 @@ import type {
 } from "../shared/messages";
 import {
   DEBOUNCE_DEFAULT_MS,
+  MAX_RECENT_SNAPSHOTS,
+  PROXY_DEFAULT_PORT,
+  RECENT_SNAPSHOTS_KEY,
   SCHEMA_VERSION,
   type SnapshotReadyPayload,
 } from "../shared";
+import { buildZip } from "../shared/zip";
 
 export type SnapshotEventType =
   | "AGENT_CAPTURED"
@@ -147,6 +152,63 @@ async function writePendingKbFiles(pending: PendingKbFileMap): Promise<void> {
   await chrome.storage.session.set({ [PENDING_KB_FILES_STORAGE_KEY]: pending });
 }
 
+// ─── Recent-snapshot index (chrome.storage.local) ────────────────────────────
+
+async function readRecentSnapshotsFromStorage(): Promise<RecentSnapshotEntry[]> {
+  const stored = await chrome.storage.local.get(RECENT_SNAPSHOTS_KEY);
+  const value = stored[RECENT_SNAPSHOTS_KEY];
+  return Array.isArray(value) ? (value as RecentSnapshotEntry[]) : [];
+}
+
+async function appendRecentSnapshot(entry: RecentSnapshotEntry): Promise<void> {
+  const current = await readRecentSnapshotsFromStorage();
+  // Prepend newest-first, deduplicate by agentId+capturedAt, cap at MAX.
+  const next = [entry, ...current].slice(0, MAX_RECENT_SNAPSHOTS);
+  await chrome.storage.local.set({ [RECENT_SNAPSHOTS_KEY]: next });
+}
+
+/** Read the recent-snapshot index from local storage. Exported for the popup. */
+export async function readRecentSnapshots(): Promise<RecentSnapshotEntry[]> {
+  return readRecentSnapshotsFromStorage();
+}
+
+// ─── Proxy POST ───────────────────────────────────────────────────────────────
+
+/**
+ * Serialise the snapshot to a zip and POST it to the local proxy.
+ * Returns `true` on HTTP 2xx, `false` if the proxy is unreachable or returns
+ * an error — never throws so a missing proxy never crashes the service worker.
+ */
+async function postSnapshotToProxy(
+  snapshot: AgentSnapshot,
+  port: number,
+): Promise<boolean> {
+  const url = `http://localhost:${port}/snapshots`;
+  let zipBytes: Uint8Array;
+  try {
+    zipBytes = buildZip(snapshot);
+  } catch (err) {
+    console.error("[wxo-autosave] buildZip failed", err);
+    return false;
+  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/zip" },
+      body: zipBytes,
+    });
+    if (!res.ok) {
+      console.warn(`[wxo-autosave] proxy POST returned ${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    // Proxy offline — swallow; do not crash the service worker.
+    console.warn("[wxo-autosave] proxy unreachable:", err);
+    return false;
+  }
+}
+
 async function upsertSnapshot(
   agentId: string,
   updater: (snapshot: AgentSnapshot) => AgentSnapshot,
@@ -252,11 +314,11 @@ function toSnapshotFile(payload: KBFilePayload): SnapshotFile {
   };
 }
 
-function emitSnapshotReady(
+async function emitSnapshotReady(
   events: SnapshotAssemblerEvents,
   agentId: string,
   snapshot: AgentSnapshot,
-): void {
+): Promise<void> {
   const payload: SnapshotReadyPayload = { agentId, snapshot };
 
   events.emit("SNAPSHOT_READY", payload);
@@ -267,6 +329,20 @@ function emitSnapshotReady(
     } catch (error) {
       console.error("[wxo-autosave] snapshot ready listener failed", error);
     }
+  }
+
+  // POST zip to local proxy; on success update the recent-snapshot index.
+  const ok = await postSnapshotToProxy(snapshot, PROXY_DEFAULT_PORT);
+  if (ok) {
+    const entry: RecentSnapshotEntry = {
+      agentId,
+      agentName: snapshot.agent.name,
+      tenant: snapshot.tenant,
+      capturedAt: snapshot.capturedAt,
+      proxyUrl: `http://localhost:${PROXY_DEFAULT_PORT}/snapshots`,
+    };
+    await appendRecentSnapshot(entry);
+    console.debug("[wxo-autosave] snapshot saved", agentId, snapshot.capturedAt);
   }
 }
 
@@ -279,12 +355,14 @@ function scheduleSnapshotReady(
     clearTimeout(timer);
   }
 
-  const nextTimer = self.setTimeout(async () => {
+  const nextTimer = self.setTimeout(() => {
     debounceTimers.delete(agentId);
-    const snapshots = await readSnapshots();
-    const snapshot = snapshots[agentId];
-    if (!snapshot) return;
-    emitSnapshotReady(events, agentId, snapshot);
+    void (async () => {
+      const snapshots = await readSnapshots();
+      const snapshot = snapshots[agentId];
+      if (!snapshot) return;
+      await emitSnapshotReady(events, agentId, snapshot);
+    })();
   }, DEBOUNCE_DEFAULT_MS);
 
   debounceTimers.set(agentId, nextTimer);

@@ -266,15 +266,17 @@ inactivity. This prevents a flood of network saves for every individual field ed
   and flag the tool in the snapshot manifest as `sourceUnavailable: true` so the restore path can
   warn the user rather than silently failing
 
-**Status:** [-] in progress
+**Status:** [x] done
 
 **Recorded deviations from original draft:**
 - `AgentSnapshot` is now defined in `src/shared/index.ts` and the assembler is implemented in `src/background/assembler.ts`
 - Agent PATCH with `toolsSelected[]` is the primary snapshot trigger, reducing the need for proactive tool detail fetching in the common path
 - The current implementation persists in-flight assembly state in `chrome.storage.session`
-- `SNAPSHOT_READY` bus emission is now implemented (commit `2856cad`)
-- Zip serialisation is now implemented via `src/shared/zip.ts` (Sub-Task 4 complete)
-- The current implementation does **not yet** POST to the proxy or maintain the recent-snapshot index in `chrome.storage.local`
+- `SNAPSHOT_READY` bus emission implemented (commit `2856cad`)
+- Zip serialisation implemented via `src/shared/zip.ts` (Sub-Task 4)
+- On `SNAPSHOT_READY`, the assembler calls `buildZip` and POSTs to `http://localhost:7878/snapshots`; proxy-offline errors are silently swallowed
+- On successful POST, a `RecentSnapshotEntry` is prepended to a `chrome.storage.local` index capped at 5 entries; `readRecentSnapshots()` is exported for the popup
+- Port is currently hardcoded to `PROXY_DEFAULT_PORT` (7878); will become user-configurable in Sub-Task 5
 
 ---
 

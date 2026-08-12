@@ -28,6 +28,11 @@ export interface ConnectionMeta {
   server_url?: string;
 }
 
+export interface SnapshotReadyPayload {
+  agentId: string;
+  snapshot: AgentSnapshot;
+}
+
 export interface SnapshotAgent {
   id: string;
   name: string;
@@ -80,3 +85,20 @@ export const SCHEMA_VERSION = "1.0.0";
 
 /** wxO SaaS hostname pattern — CONFIRMED: cloud.ibm.com, not ibm.com */
 export const WXO_HOSTNAME = "*.watson-orchestrate.cloud.ibm.com";
+
+/** chrome.storage.local key for the recent-snapshot index. */
+export const RECENT_SNAPSHOTS_KEY = "recentSnapshots";
+
+/** Maximum number of entries kept in the recent-snapshot index. */
+export const MAX_RECENT_SNAPSHOTS = 5;
+
+// ─── Recent-snapshot index entry ─────────────────────────────────────────────
+
+/** Lightweight index entry written to chrome.storage.local after each save. */
+export interface RecentSnapshotEntry {
+  agentId: string;
+  agentName: string;
+  tenant: string;
+  capturedAt: string;
+  proxyUrl: string;
+}
