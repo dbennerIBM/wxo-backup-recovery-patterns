@@ -57,7 +57,7 @@ export function on<T extends ExtensionMessage>(
   handlers.get(type)!.push(handler);
 }
 
-function emit<T extends ExtensionMessage>(
+export function emit<T extends ExtensionMessage>(
   type: T["type"],
   payload: T["payload"],
 ): void {
