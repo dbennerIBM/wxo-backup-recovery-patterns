@@ -27,6 +27,25 @@ directly.
 
 ---
 
+## Confirmed deviations from initial assumptions
+
+These changes are now confirmed by 4 live HAR recording sessions against `us-south.watson-orchestrate.cloud.ibm.com` (Aug 2026) and should be treated as the source of truth over the original plan assumptions below.
+
+- **wxO SaaS hostname corrected:** from `*.watson-orchestrate.ibm.com` to `*.watson-orchestrate.cloud.ibm.com`
+- **Manifest/network strategy corrected:** the extension uses a content-script `fetch` interceptor for response bodies and `chrome.webRequest` for multipart request bodies; `declarativeNetRequest` is not part of the current design
+- **Live API surface corrected:** the UI uses `mfe_builder/api/...` endpoints with a mix of `v1` and `v2`, not the original generic `/v2/orchestrate/...` paths assumed in the draft
+- **Auth model corrected:** wxO SaaS UI requests use session cookie + `x-ibm-wo-csrf`; there is no `Authorization: Bearer` header on the captured UI traffic
+- **Agent PATCH is the primary snapshot trigger:** `PATCH /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}` includes `toolsSelected[]` with full binding objects, so proactive tool fetch is now a fallback path rather than the common path
+- **KB create/upload flow corrected:** KB creation plus first document upload is a single multipart `POST /mfe_builder/api/v1/orchestrate/knowledge-bases/documents`; subsequent document uploads use `PUT /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}/documents`
+- **Connections response shape corrected:** the response envelope is `{ applications: [...] }`, not `{ resources: [...] }`
+- **Catalog tool source limitation confirmed:** catalog tools added via `create-from-template` use presigned S3 artefacts, so source files are not capturable from `mfe_builder`; only metadata and binding can be captured in that path
+
+## Implementation status reality check
+
+- **Sub-Task 1:** complete
+- **Sub-Task 2:** complete in implemented architecture, with endpoint/auth assumptions corrected from the original draft
+- **Sub-Task 3:** in progress — the assembler exists and persists per-agent state in `chrome.storage.session`, but `SNAPSHOT_READY` bus emission, zip serialisation, proxy POST, and recent-snapshot local index are not yet implemented
+
 ## Sub-Tasks
 
 ---
@@ -91,6 +110,10 @@ Chrome extension. This foundation determines every subsequent sub-task so it mus
   `declarativeNetRequest` will be added in Sub-Task 2 if needed for redirect-based interception
 
 **Status:** [x] done
+
+**Recorded deviation from original draft:**
+- Manifest permissions settled on `webRequest` rather than `declarativeNetRequest`
+- Host permissions corrected to `*.watson-orchestrate.cloud.ibm.com/*`
 
 ---
 
@@ -159,7 +182,15 @@ requests, extracts the relevant data, and emits structured events to the assembl
   alongside the `app_id` and `server_url`, as this is the information needed to reconstruct the
   connection on restore (without it the user cannot know which credential type to re-enter)
 
-**Status:** [ ] pending
+**Status:** [x] done
+
+**Recorded deviations from original draft:**
+- Endpoint list corrected to confirmed `mfe_builder/api/...` paths
+- Response capture is implemented via content-script `fetch` interception, not `webRequest.onCompleted` re-fetching
+- Auth model corrected from bearer-token assumptions to session cookie + `x-ibm-wo-csrf`
+- KB document create/upload flow corrected: create is atomic POST; additional uploads are PUT
+- Connections response envelope corrected from `resources` to `applications`
+- Catalog tool source capture is not possible in the `create-from-template` path because the source is not transmitted to `mfe_builder`
 
 ---
 
@@ -235,7 +266,13 @@ inactivity. This prevents a flood of network saves for every individual field ed
   and flag the tool in the snapshot manifest as `sourceUnavailable: true` so the restore path can
   warn the user rather than silently failing
 
-**Status:** [ ] pending
+**Status:** [-] in progress
+
+**Recorded deviations from original draft:**
+- `AgentSnapshot` is now defined in `src/shared/index.ts` and the assembler is implemented in `src/background/assembler.ts`
+- Agent PATCH with `toolsSelected[]` is the primary snapshot trigger, reducing the need for proactive tool detail fetching in the common path
+- The current implementation persists in-flight assembly state in `chrome.storage.session`
+- The current implementation does **not yet** emit `SNAPSHOT_READY` on the internal bus, serialise zips, POST to the proxy, or maintain the recent-snapshot index in `chrome.storage.local`
 
 ---
 

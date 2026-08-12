@@ -124,6 +124,53 @@ function makeHandleMessage(
   };
 }
 
+// ─── Inline pure-function extracts from background/assembler.ts ───────────────
+
+interface TestSnapshotFile {
+  filename: string;
+  contentType: string;
+  bytes: number[];
+}
+
+interface TestKnowledgeBase {
+  id: string;
+  meta: Record<string, unknown>;
+  files: TestSnapshotFile[];
+}
+
+interface TestAgentSnapshot {
+  knowledgeBases: TestKnowledgeBase[];
+}
+
+function findNewKnowledgeBaseId(
+  knownKbIds: string[],
+  currentKbIds: string[],
+): string | null {
+  for (const kbId of currentKbIds) {
+    if (!knownKbIds.includes(kbId)) {
+      return kbId;
+    }
+  }
+  return null;
+}
+
+function attachFilesToKnowledgeBase(
+  snapshot: TestAgentSnapshot,
+  kbId: string,
+  files: TestSnapshotFile[],
+): void {
+  const kbIndex = snapshot.knowledgeBases.findIndex((kb) => kb.id === kbId);
+  if (kbIndex === -1) {
+    snapshot.knowledgeBases.push({ id: kbId, meta: { id: kbId }, files });
+    return;
+  }
+
+  snapshot.knowledgeBases[kbIndex] = {
+    ...snapshot.knowledgeBases[kbIndex],
+    files: [...snapshot.knowledgeBases[kbIndex].files, ...files],
+  };
+}
+
 // ─── rawBytesFromRequestBody ──────────────────────────────────────────────────
 
 describe("rawBytesFromRequestBody — ArrayBuffer chunk concatenation", () => {
@@ -367,6 +414,72 @@ describe("handleMessage dispatch — per-type routing and scrubbing", () => {
     expect(received).toHaveLength(1);
     expect(received[0]).toEqual(filePayload);
   });
+
+// ─── assembler KB correlation helpers ─────────────────────────────────────────
+
+describe("assembler KB correlation helpers — one-agent active-session boundary", () => {
+  it("findNewKnowledgeBaseId returns the newly added kb id", () => {
+    expect(
+      findNewKnowledgeBaseId(["kb-existing"], ["kb-existing", "kb-new"]),
+    ).toBe("kb-new");
+  });
+
+  it("findNewKnowledgeBaseId returns null when no new kb id appears", () => {
+    expect(
+      findNewKnowledgeBaseId(["kb-existing"], ["kb-existing"]),
+    ).toBeNull();
+  });
+
+  it("findNewKnowledgeBaseId returns the first unseen kb id when multiple are present", () => {
+    expect(
+      findNewKnowledgeBaseId(["kb-1"], ["kb-1", "kb-2", "kb-3"]),
+    ).toBe("kb-2");
+  });
+
+  it("attachFilesToKnowledgeBase creates a new KB entry when absent", () => {
+    const snapshot: TestAgentSnapshot = { knowledgeBases: [] };
+    const files: TestSnapshotFile[] = [
+      { filename: "doc1.pdf", contentType: "application/pdf", bytes: [1, 2] },
+    ];
+
+    attachFilesToKnowledgeBase(snapshot, "kb-new", files);
+
+    expect(snapshot.knowledgeBases).toHaveLength(1);
+    expect(snapshot.knowledgeBases[0]).toEqual({
+      id: "kb-new",
+      meta: { id: "kb-new" },
+      files,
+    });
+  });
+
+  it("attachFilesToKnowledgeBase appends files to an existing KB entry", () => {
+    const snapshot: TestAgentSnapshot = {
+      knowledgeBases: [
+        {
+          id: "kb-existing",
+          meta: { id: "kb-existing", name: "existing" },
+          files: [
+            { filename: "doc1.pdf", contentType: "application/pdf", bytes: [1] },
+          ],
+        },
+      ],
+    };
+
+    attachFilesToKnowledgeBase(snapshot, "kb-existing", [
+      { filename: "doc2.pdf", contentType: "application/pdf", bytes: [2] },
+    ]);
+
+    expect(snapshot.knowledgeBases).toHaveLength(1);
+    expect(snapshot.knowledgeBases[0]!.files).toEqual([
+      { filename: "doc1.pdf", contentType: "application/pdf", bytes: [1] },
+      { filename: "doc2.pdf", contentType: "application/pdf", bytes: [2] },
+    ]);
+    expect(snapshot.knowledgeBases[0]!.meta).toEqual({
+      id: "kb-existing",
+      name: "existing",
+    });
+  });
+});
 
   it("TOOL_FILE_CAPTURED emits the payload verbatim", () => {
     const received: unknown[] = [];

@@ -44,9 +44,16 @@ export interface SnapshotAssemblerEvents {
 }
 
 const SNAPSHOT_STORAGE_KEY = "agentSnapshots";
+const PENDING_KB_FILES_STORAGE_KEY = "pendingKbFiles";
 
 type SnapshotMap = Record<string, AgentSnapshot>;
-type PendingKbFileMap = Record<string, SnapshotFile[]>;
+
+export interface PendingKbFileBuffer {
+  knownKbIds: string[];
+  files: SnapshotFile[];
+}
+
+type PendingKbFileMap = Record<string, PendingKbFileBuffer>;
 
 type SnapshotReadyListener = (agentId: string, snapshot: AgentSnapshot) => void;
 
@@ -123,14 +130,14 @@ async function writeSnapshots(snapshots: SnapshotMap): Promise<void> {
 }
 
 async function readPendingKbFiles(): Promise<PendingKbFileMap> {
-  const stored = await chrome.storage.session.get("pendingKbFiles");
-  const value = stored["pendingKbFiles"];
+  const stored = await chrome.storage.session.get(PENDING_KB_FILES_STORAGE_KEY);
+  const value = stored[PENDING_KB_FILES_STORAGE_KEY];
   if (!isRecord(value)) return {};
   return value as PendingKbFileMap;
 }
 
 async function writePendingKbFiles(pending: PendingKbFileMap): Promise<void> {
-  await chrome.storage.session.set({ pendingKbFiles: pending });
+  await chrome.storage.session.set({ [PENDING_KB_FILES_STORAGE_KEY]: pending });
 }
 
 async function upsertSnapshot(
@@ -265,37 +272,52 @@ function scheduleSnapshotReady(agentId: string): void {
   debounceTimers.set(agentId, nextTimer);
 }
 
-async function flushPendingKbFiles(agentId: string, kbIds: string[]): Promise<void> {
-  if (kbIds.length === 0) return;
+function findNewKnowledgeBaseId(
+  knownKbIds: string[],
+  currentKbIds: string[],
+): string | null {
+  for (const kbId of currentKbIds) {
+    if (!knownKbIds.includes(kbId)) {
+      return kbId;
+    }
+  }
+  return null;
+}
 
+function attachFilesToKnowledgeBase(
+  snapshot: AgentSnapshot,
+  kbId: string,
+  files: SnapshotFile[],
+): void {
+  const kbIndex = snapshot.knowledgeBases.findIndex((kb) => kb.id === kbId);
+  if (kbIndex === -1) {
+    snapshot.knowledgeBases.push({
+      id: kbId,
+      meta: { id: kbId },
+      files,
+    });
+    return;
+  }
+
+  snapshot.knowledgeBases[kbIndex] = {
+    ...snapshot.knowledgeBases[kbIndex],
+    files: [...snapshot.knowledgeBases[kbIndex].files, ...files],
+  };
+}
+
+async function flushPendingKbFiles(agentId: string, kbIds: string[]): Promise<void> {
   const pending = await readPendingKbFiles();
-  const buffered = pending[agentId] ?? [];
-  if (buffered.length === 0) return;
+  const buffer = pending[agentId];
+  if (!buffer || buffer.files.length === 0) return;
+
+  const targetKbId = findNewKnowledgeBaseId(buffer.knownKbIds, kbIds);
+  if (!targetKbId) return;
 
   const snapshots = await readSnapshots();
   const snapshot = snapshots[agentId];
   if (!snapshot) return;
 
-  const unresolvedIds = kbIds.filter(
-    (kbId) => !snapshot.knowledgeBases.some((kb) => kb.id === kbId),
-  );
-  const targetKbId = unresolvedIds[0] ?? kbIds[kbIds.length - 1];
-  if (!targetKbId) return;
-
-  const kbIndex = snapshot.knowledgeBases.findIndex((kb) => kb.id === targetKbId);
-  if (kbIndex === -1) {
-    snapshot.knowledgeBases.push({
-      id: targetKbId,
-      meta: { id: targetKbId },
-      files: buffered,
-    });
-  } else {
-    snapshot.knowledgeBases[kbIndex] = {
-      ...snapshot.knowledgeBases[kbIndex],
-      files: [...snapshot.knowledgeBases[kbIndex].files, ...buffered],
-    };
-  }
-
+  attachFilesToKnowledgeBase(snapshot, targetKbId, buffer.files);
   snapshot.capturedAt = new Date().toISOString();
   snapshots[agentId] = snapshot;
   delete pending[agentId];
@@ -396,6 +418,7 @@ async function handleKbMetaCaptured(payload: KBMetaPayload): Promise<void> {
   if (!kbId) return;
 
   const snapshots = await readSnapshots();
+  const pending = await readPendingKbFiles();
   let updated = false;
 
   for (const [agentId, snapshot] of Object.entries(snapshots)) {
@@ -409,6 +432,13 @@ async function handleKbMetaCaptured(payload: KBMetaPayload): Promise<void> {
       files: existing?.files ?? [],
     };
     upsertById(next.knowledgeBases, kb);
+
+    const buffer = pending[agentId];
+    if (buffer && !buffer.knownKbIds.includes(kbId)) {
+      attachFilesToKnowledgeBase(next, kbId, buffer.files);
+      delete pending[agentId];
+    }
+
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
     updated = true;
@@ -416,7 +446,7 @@ async function handleKbMetaCaptured(payload: KBMetaPayload): Promise<void> {
   }
 
   if (updated) {
-    await writeSnapshots(snapshots);
+    await Promise.all([writeSnapshots(snapshots), writePendingKbFiles(pending)]);
   }
 }
 
@@ -430,7 +460,14 @@ async function handleKbFileCaptured(payload: KBFilePayload): Promise<void> {
     if (!agentId) return;
 
     const pending = await readPendingKbFiles();
-    pending[agentId] = [...(pending[agentId] ?? []), file];
+    const snapshot = snapshots[agentId];
+    const knownKbIds = snapshot ? [...snapshot.agent.knowledge_base] : [];
+    const existing = pending[agentId];
+
+    pending[agentId] = {
+      knownKbIds: existing?.knownKbIds ?? knownKbIds,
+      files: [...(existing?.files ?? []), file],
+    };
     await writePendingKbFiles(pending);
     return;
   }
@@ -442,19 +479,7 @@ async function handleKbFileCaptured(payload: KBFilePayload): Promise<void> {
     if (!snapshot.agent.knowledge_base.includes(payload.kbId)) continue;
 
     const next = cloneSnapshot(snapshot);
-    const kbIndex = next.knowledgeBases.findIndex((kb) => kb.id === payload.kbId);
-    if (kbIndex === -1) {
-      next.knowledgeBases.push({
-        id: payload.kbId,
-        meta: { id: payload.kbId },
-        files: [file],
-      });
-    } else {
-      next.knowledgeBases[kbIndex] = {
-        ...next.knowledgeBases[kbIndex],
-        files: [...next.knowledgeBases[kbIndex].files, file],
-      };
-    }
+    attachFilesToKnowledgeBase(next, payload.kbId, [file]);
 
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
