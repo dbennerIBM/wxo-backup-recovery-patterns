@@ -88,11 +88,13 @@ wxo-autosave-proxy/                         ← Local proxy server
 | Multipart decoder (KB / tool uploads) | ✅ Complete |
 | Snapshot assembler + debounce engine | ✅ Complete |
 | Zip serialiser (`fflate`) | ✅ Complete |
-| Popup UI (session, history, restore flow, settings) | ✅ Complete |
+| Snapshot capture — KB uploads, tool additions | ✅ Verified on live tenant |
+| Popup UI (session, history, restore flow, settings) | 🟡 Functional — needs expansion |
+| Restore via ADK CLI | 🟡 Implemented — not yet verified |
 | Local proxy server — all 4 endpoints | ✅ Complete |
 | Storage adapters — IBM COS, AWS S3, GCS | ✅ Complete |
 | Unit tests — 443 total (359 extension + 84 proxy) | ✅ All passing |
-| E2E test runbook (4 scenarios) | ✅ Complete |
+| E2E test runbook (4 scenarios) | 🟡 Written — restore scenarios not yet verified |
 | Google Drive storage adapter | 🔲 Planned |
 | Azure Blob storage adapter | 🔲 Planned |
 | Chrome Web Store distribution | 🔲 Side-load only for now |
@@ -156,8 +158,10 @@ Quick links:
 - [E2E Testing Runbook](TESTING.md)
 - [Changelog](CHANGELOG.md)
 
-### Open Contributions
+### Open Work
 
+- **Verify restore end-to-end** — restore flow is implemented but has not been tested against a live tenant
+- **Expand the popup UI** — current UI is functional but minimal; needs polish and additional features
 - **Google Drive storage adapter** — OAuth 2.0 + Drive API v3 (specified in FR-4.6)
 - **Azure Blob storage adapter** — interface is ready, implementation needed
 - **Chrome Web Store packaging** — icons, store listing, review preparation
