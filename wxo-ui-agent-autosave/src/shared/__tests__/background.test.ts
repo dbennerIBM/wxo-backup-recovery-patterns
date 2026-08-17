@@ -548,6 +548,7 @@ function makeMinimalSnapshot(agentId: string): AgentSnapshot {
       id: agentId,
       name: "test-agent",
       guidelines: [],
+      tools: [],
       knowledge_base: [],
       collaborators: [],
       tags: [],

@@ -90,6 +90,9 @@ function handleMessage(message: ExtensionMessage): void {
       emit("AGENT_CAPTURED", {
         data: scrubbed,
         sourceUrl: message.payload.sourceUrl,
+        ...(typeof message.payload.tenantHint === "string" && message.payload.tenantHint !== ""
+          ? { tenantHint: message.payload.tenantHint }
+          : {}),
       });
       console.debug("[wxo-autosave] AGENT_CAPTURED", message.payload.sourceUrl);
       break;
@@ -117,6 +120,25 @@ function handleMessage(message: ExtensionMessage): void {
       });
       emit("CONNECTION_CAPTURED", scrubbed);
       console.debug("[wxo-autosave] CONNECTION_CAPTURED", scrubbed.app_id);
+      break;
+    }
+
+    case "CONNECTION_BATCH_CAPTURED": {
+      // The MAIN-world interceptor sends all connections from one response in
+      // a single message. Re-apply the allowlist to each and forward as ONE
+      // batch event so the assembler applies them in a single read-modify-write.
+      const items = Array.isArray(message.payload) ? message.payload : [];
+      const scrubbedBatch = items
+        .filter((item) => typeof item === "object" && item !== null)
+        .map((item) =>
+          scrubConnectionPayload({
+            app_id: item.app_id,
+            kind: item.kind,
+            server_url: item.server_url,
+          }),
+        );
+      emit("CONNECTION_BATCH_CAPTURED", scrubbedBatch);
+      console.debug("[wxo-autosave] CONNECTION_BATCH_CAPTURED", `${items.length} connections`);
       break;
     }
 
@@ -193,6 +215,14 @@ const KB_UPLOAD_URL_FILTER =
 const TOOL_UPLOAD_URL_FILTER =
   "*://*.watson-orchestrate.cloud.ibm.com/mfe_builder/api/v2/builder/tools*";
 
+// Alternate URL filters for watson-orchestrate.ibm.com (without "cloud.")
+const KB_CREATE_URL_FILTER_ALT =
+  "*://*.watson-orchestrate.ibm.com/mfe_builder/api/v1/orchestrate/knowledge-bases/documents*";
+const KB_UPLOAD_URL_FILTER_ALT =
+  "*://*.watson-orchestrate.ibm.com/mfe_builder/api/v1/orchestrate/knowledge-bases/*/documents*";
+const TOOL_UPLOAD_URL_FILTER_ALT =
+  "*://*.watson-orchestrate.ibm.com/mfe_builder/api/v2/builder/tools*";
+
 const KB_CREATE_RE =
   /\/mfe_builder\/api\/v1\/orchestrate\/knowledge-bases\/documents(\?|$)/;
 const KB_UPLOAD_RE =
@@ -263,6 +293,9 @@ const ALL_UPLOAD_URL_FILTERS = [
   KB_CREATE_URL_FILTER,
   KB_UPLOAD_URL_FILTER,
   TOOL_UPLOAD_URL_FILTER,
+  KB_CREATE_URL_FILTER_ALT,
+  KB_UPLOAD_URL_FILTER_ALT,
+  TOOL_UPLOAD_URL_FILTER_ALT,
 ];
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -284,9 +317,16 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (bytes === null || bytes.length === 0) return;
 
     // Look up the stored Content-Type (set by onBeforeSendHeaders).
+    //
+    // NOTE: Chrome fires onBeforeRequest BEFORE onBeforeSendHeaders, so on the
+    // first pass this is normally empty and we return here — the content
+    // script's fetch/XHR interceptors are the primary upload-capture path
+    // (they read the FormData / body directly). This listener only helps on
+    // redirects (same requestId, headers already seen). Files reach the
+    // assembler once regardless: attachFilesToKnowledgeBase() de-duplicates by
+    // filename + byte length.
     const contentType = pendingContentTypes.get(details.requestId);
     if (!contentType) {
-      // Content type not yet known — let the content script interceptor handle it.
       return;
     }
     pendingContentTypes.delete(details.requestId);

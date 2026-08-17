@@ -127,7 +127,7 @@ In the wxO Agent Builder UI, create an agent with:
    ```
    Or query the proxy directly:
    ```sh
-   curl "http://localhost:7878/snapshots?agent=e2e-test-agent&tenant=<your-tenant>"
+   curl -H "Origin: chrome-extension://e2e" "http://localhost:7878/snapshots?agent=e2e-test-agent&tenant=<your-tenant>"
    ```
    Expected: JSON array with at least one entry containing `key`, `timestamp`, `size`.
 

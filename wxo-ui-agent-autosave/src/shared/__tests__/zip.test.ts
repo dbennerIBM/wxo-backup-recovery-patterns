@@ -37,6 +37,7 @@ function makeSnapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
       llm: "ibm/granite-3-8b-instruct",
       style: "react",
       guidelines: [],
+      tools: ["tool-001"],
       knowledge_base: ["kb-001"],
       collaborators: [],
       tags: [],

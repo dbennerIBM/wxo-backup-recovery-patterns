@@ -10,7 +10,7 @@ The proxy runs on your machine alongside your browser. It receives snapshot zips
 
 | Requirement | Version |
 |---|---|
-| Node.js | ≥ 22 |
+| Node.js | ≥ 22.9 |
 | IBM watsonx Orchestrate ADK CLI | latest |
 
 The ADK CLI must be installed **and** an environment must be activated before the proxy will start:
@@ -29,17 +29,20 @@ orchestrate env activate <your-env-name>
 cd wxo-autosave-proxy
 npm install
 
-# 2. Set environment variables (see reference below)
+# 2. Configure (see reference below). Either copy the template …
+cp .env.example .env      # then edit .env — it is git-ignored
+# … or export the variables in your shell:
 export STORAGE_PROVIDER=cos
 export BUCKET=my-snapshot-bucket
 export COS_ENDPOINT=https://s3.us-south.cloud-object-storage.appdomain.cloud
 export COS_ACCESS_KEY_ID=<your-hmac-access-key>
 export COS_SECRET_ACCESS_KEY=<your-hmac-secret-key>
-export COS_INSTANCE_CRN=<your-cos-instance-crn>   # optional but recommended
 
 # 3. Start the proxy
 npm start
 ```
+
+`npm start` runs the TypeScript source directly via `tsx` and loads `.env` automatically if present (`node --env-file-if-exists=.env --import tsx src/index.ts`).
 
 The proxy listens on `http://127.0.0.1:7878` by default.
 
@@ -63,7 +66,7 @@ The proxy listens on `http://127.0.0.1:7878` by default.
 | `COS_ENDPOINT` | ✓ | Regional COS endpoint, e.g. `https://s3.us-south.cloud-object-storage.appdomain.cloud` |
 | `COS_ACCESS_KEY_ID` | ✓ | HMAC credential access key (from the COS service credentials page, with HMAC enabled) |
 | `COS_SECRET_ACCESS_KEY` | ✓ | HMAC credential secret key |
-| `COS_INSTANCE_CRN` | | Service instance CRN — required for bucket-level operations on some COS configurations |
+| `COS_INSTANCE_CRN` | | **Deprecated / ignored.** Accepted for backward compatibility only. HMAC auth does not use the `ibm-service-instance-id` header, and injecting it after signing breaks the S3 signature. |
 | `AWS_REGION` | `us-south` | COS region code |
 
 ### AWS S3 (`s3`)
@@ -88,6 +91,8 @@ The proxy listens on `http://127.0.0.1:7878` by default.
 
 ## Snapshot Storage Path
 
+> Segments are sanitised: an empty tenant becomes `unknown-tenant`, an empty agent name falls back to the agent id, and slashes inside a segment are replaced with `_`, so keys are never rooted at `/`.
+
 Snapshots are stored at:
 
 ```
@@ -105,8 +110,9 @@ myorg-us-south/my-sales-agent/2026-08-15T12:00:00.000Z.zip
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/health` | Liveness probe. Returns `200 { "status": "ok" }`. The only endpoint served without an `Origin` header. |
 | `POST` | `/snapshots` | Receive a zip from the extension, derive path from `manifest.json`, upload to storage. Returns `{ key, provider }`. |
-| `GET` | `/snapshots?agent=&tenant=` | List all snapshots for an agent. Returns `[{ key, timestamp, size, agentName }]`, newest first. |
+| `GET` | `/snapshots?agent=&tenant=` | List all snapshots for an agent. Returns `[{ key, timestamp, size, agentName }]`, newest first. Returns `200 []` when `agent`/`tenant` are missing. |
 | `GET` | `/restore/preflight?key=` | Pre-restore report: connections to re-credential, tools with unavailable source. |
 | `POST` | `/restore` | Execute restore. Body: `{ "key": "<storage-key>" }`. Streams line-delimited JSON progress. |
 
@@ -129,11 +135,17 @@ Each line is a JSON object:
 
 The proxy only accepts requests from `chrome-extension://` origins by default. To lock it to a specific extension installation, set `ALLOWED_ORIGIN` to the exact origin string shown in `chrome://extensions` for your extension (e.g. `chrome-extension://abcdefghijklmnopqrstuvwxyz012345`).
 
+Requests with **no** `Origin` header are rejected (403) — this is deliberate (SEC-4): the `/restore` endpoint shells out to the ADK CLI, so non-browser clients must not reach it. The single exception is `GET /health`, which is served to origin-less clients as a liveness probe. When testing with `curl`, pass an extension origin explicitly:
+
+```sh
+curl -H "Origin: chrome-extension://test" "http://localhost:7878/snapshots?agent=<name>&tenant=<tenant>"
+```
+
 ---
 
 ## Building (optional)
 
-The proxy can run directly from TypeScript source using Node 22's built-in strip-types flag (`npm start`), or compiled to plain JS first:
+`npm start` runs directly from TypeScript source using the `tsx` loader (a devDependency). Node's built-in `--experimental-strip-types` is **not** used because the source imports use `.js` specifiers (`./zip.js`), which the stripper does not resolve to `.ts` files. For a dependency-free production run, compile to plain JS first:
 
 ```sh
 npm run build        # compiles src/ → dist/

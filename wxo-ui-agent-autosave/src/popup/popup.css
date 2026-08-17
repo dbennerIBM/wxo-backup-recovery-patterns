@@ -240,6 +240,10 @@ body {
   z-index: 10;
 }
 
+.overlay[hidden] {
+  display: none;
+}
+
 .overlay-box {
   width: 100%;
   max-width: 310px;
@@ -303,6 +307,10 @@ body {
   display: flex;
   gap: 8px;
   margin-top: 14px;
+}
+
+.overlay-actions[hidden] {
+  display: none;
 }
 
 /* ── Progress list ──────────────────────────────────────────────────────────── */

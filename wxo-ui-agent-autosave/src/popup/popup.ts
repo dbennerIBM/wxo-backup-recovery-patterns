@@ -70,14 +70,39 @@ function formatTime(iso: string): string {
 
 // ─── Proxy helpers ────────────────────────────────────────────────────────────
 
+/** Proxy hosts to try in order — localhost first, then 127.0.0.1 as fallback. */
+const PROXY_HOSTS = ["localhost", "127.0.0.1"] as const;
+
+/**
+ * Try a fetch against localhost first, then 127.0.0.1 if the first attempt
+ * fails with a network error (e.g. IPv6-only `localhost` resolution while the
+ * proxy is bound to IPv4). Returns the first successful Response, or throws
+ * the last error if both fail. Mirrors `tryFetch` in background/assembler.ts.
+ */
+async function tryFetch(
+  port: number,
+  path: string,
+  options?: RequestInit,
+): Promise<Response> {
+  let lastError: unknown;
+  for (const host of PROXY_HOSTS) {
+    try {
+      return await fetch(`http://${host}:${port}${path}`, options);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
 async function fetchProxySnapshots(
   port: number,
   agentName: string,
   tenant: string,
 ): Promise<ProxySnapshotRow[] | null> {
-  const url = `http://localhost:${port}/snapshots?agent=${encodeURIComponent(agentName)}&tenant=${encodeURIComponent(tenant)}`;
+  const path = `/snapshots?agent=${encodeURIComponent(agentName)}&tenant=${encodeURIComponent(tenant)}`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    const res = await tryFetch(port, path, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return null;
     return (await res.json()) as ProxySnapshotRow[];
   } catch {
@@ -85,13 +110,23 @@ async function fetchProxySnapshots(
   }
 }
 
+/** Liveness probe against GET /health. */
+async function pingProxy(port: number): Promise<boolean> {
+  try {
+    const res = await tryFetch(port, "/health", { signal: AbortSignal.timeout(2000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchPreflight(
   port: number,
   key: string,
 ): Promise<PreflightReport | null> {
-  const url = `http://localhost:${port}/restore/preflight?key=${encodeURIComponent(key)}`;
+  const path = `/restore/preflight?key=${encodeURIComponent(key)}`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const res = await tryFetch(port, path, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) return null;
     return (await res.json()) as PreflightReport;
   } catch {
@@ -103,9 +138,8 @@ async function postRestore(
   port: number,
   key: string,
 ): Promise<Response | null> {
-  const url = `http://localhost:${port}/restore`;
   try {
-    return await fetch(url, {
+    return await tryFetch(port, "/restore", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key }),
@@ -288,11 +322,22 @@ async function handleRestoreRequest(key: string, agentName: string, port: number
 }
 
 async function executeRestore(port: number): Promise<void> {
+  // Capture before hidePreflightOverlay() clears the pending state.
+  const key  = pendingRestoreKey;
+  const name = pendingRestoreName;
   hidePreflightOverlay();
-  showProgressOverlay(pendingRestoreName);
+
+  if (!key) {
+    showProgressOverlay(name || "snapshot");
+    appendProgressItem("No snapshot selected — restore aborted.", "error");
+    finaliseProgress();
+    return;
+  }
+
+  showProgressOverlay(name);
   appendProgressItem("Sending restore request…", "info");
 
-  const res = await postRestore(port, pendingRestoreKey);
+  const res = await postRestore(port, key);
   if (!res) {
     appendProgressItem("Proxy unreachable — restore could not be started.", "error");
     finaliseProgress();
@@ -369,6 +414,10 @@ async function saveSettingsFromForm(): Promise<void> {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 async function init(): Promise<void> {
+  // 0. Overlays start hidden regardless of markup state.
+  hide("overlay-preflight");
+  hide("overlay-progress");
+
   // 1. Load settings.
   const settings = await readSettings();
   currentPort = settings.proxyPort;
@@ -399,13 +448,8 @@ async function init(): Promise<void> {
       rowsToRender = proxyRows;
     }
   } else {
-    // No local history yet — still try a proxy ping to see if it's up.
-    try {
-      const ping = await fetch(`http://localhost:${settings.proxyPort}/snapshots`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      proxyOnline = ping.ok || ping.status < 500;
-    } catch { /* offline */ }
+    // No local history yet — still probe GET /health to see if the proxy is up.
+    proxyOnline = await pingProxy(settings.proxyPort);
   }
 
   if (!proxyOnline) show("banner-offline");
@@ -436,4 +480,6 @@ async function init(): Promise<void> {
   });
 }
 
-void init();
+void init().catch((err: unknown) => {
+  console.error("[wxo-autosave] popup init failed:", err);
+});

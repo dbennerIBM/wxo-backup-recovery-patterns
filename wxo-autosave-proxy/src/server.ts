@@ -51,6 +51,12 @@ function internalError(res: ServerResponse, message: string): void {
   json(res, 500, { error: message });
 }
 
+/** A safe single storage-path segment: trimmed, no slashes; fallback if empty. */
+export function pathSegment(value: unknown, fallback: string): string {
+  const v = typeof value === "string" ? value.trim().replace(/[\\/]+/g, "_") : "";
+  return v === "" ? fallback : v;
+}
+
 function parsedUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? "/", "http://localhost");
 }
@@ -71,6 +77,12 @@ function handleCors(
 
   // Allow any chrome-extension:// origin when the configured value is the
   // bare scheme (default), or require an exact match when a full ID is set.
+  //
+  // An empty Origin is NOT accepted (SEC-4). Extension contexts — the MV3
+  // service worker and the popup — always send `Origin: chrome-extension://…`
+  // on cross-origin fetches, so only non-browser clients (curl, scripts) lack
+  // it, and those must not reach /restore. The one exception is the
+  // GET /health liveness probe, handled before this function in createProxyServer.
   const originOk =
     allowedOrigin === "chrome-extension://"
       ? origin.startsWith("chrome-extension://")
@@ -127,7 +139,11 @@ async function handlePostSnapshot(
 
   const { manifest } = zip;
   // FR-4.1: storage path = {tenant}/{agent-name}/{ISO-timestamp}.zip
-  const storageKey = `${manifest.tenant}/${manifest.agentName}/${manifest.capturedAt}.zip`;
+  // Never let the key start with "/" or contain an empty segment — some agent
+  // payloads carry no tenant_id, and the extension may not have a hint yet.
+  const tenant = pathSegment(manifest.tenant, "unknown-tenant");
+  const agentName = pathSegment(manifest.agentName, manifest.agentId || "unknown-agent");
+  const storageKey = `${tenant}/${agentName}/${manifest.capturedAt}.zip`;
 
   let id: string;
   try {
@@ -150,7 +166,8 @@ async function handleGetSnapshots(
   const tenant = url.searchParams.get("tenant")?.trim() ?? "";
 
   if (!agent || !tenant) {
-    return badRequest(res, "Query params agent and tenant are required");
+    // Return empty list instead of error when params are missing.
+    return json(res, 200, []);
   }
 
   const prefix = `${tenant}/${agent}/`;
@@ -274,15 +291,26 @@ export function createProxyServer(
   adapter: StorageAdapter,
 ): ReturnType<typeof createServer> {
   const server = createServer((req, res) => {
-    if (!handleCors(req, res, config.allowedOrigin)) return;
-
     const url    = parsedUrl(req);
     const method = req.method ?? "GET";
     const path   = url.pathname;
 
+    // GET /health is a liveness probe that reveals nothing and mutates nothing,
+    // so it is served to origin-less clients (curl, health checkers) without
+    // the CORS gate. Browser callers still pass through handleCors below so
+    // they receive Access-Control-Allow-Origin.
+    if (method === "GET" && path === "/health" && !req.headers["origin"]) {
+      json(res, 200, { status: "ok" });
+      return;
+    }
+
+    if (!handleCors(req, res, config.allowedOrigin)) return;
+
     void (async () => {
       try {
-        if (method === "POST" && path === "/snapshots") {
+        if (method === "GET" && path === "/health") {
+          json(res, 200, { status: "ok" });
+        } else if (method === "POST" && path === "/snapshots") {
           await handlePostSnapshot(req, res, adapter, config.provider);
         } else if (method === "GET" && path === "/snapshots") {
           await handleGetSnapshots(req, res, adapter);

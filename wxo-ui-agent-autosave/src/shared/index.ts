@@ -42,6 +42,9 @@ export interface SnapshotAgent {
   llm?: string;
   style?: string;
   guidelines: unknown[];
+  /** Referenced tool uuids (`tools[]` on the agent payload). Lets the assembler
+   *  accept tool details that arrive before/without a populated `toolsSelected`. */
+  tools: string[];
   knowledge_base: string[];
   collaborators: unknown[];
   tags: unknown;
@@ -83,8 +86,9 @@ export const PROXY_DEFAULT_PORT = 7878;
 export const DEBOUNCE_DEFAULT_MS = 3000;
 export const SCHEMA_VERSION = "1.0.0";
 
-/** wxO SaaS hostname pattern — CONFIRMED: cloud.ibm.com, not ibm.com */
+/** wxO SaaS hostname patterns -- supports both cloud.ibm.com and ibm.com variants */
 export const WXO_HOSTNAME = "*.watson-orchestrate.cloud.ibm.com";
+export const WXO_HOSTNAME_ALT = "*.watson-orchestrate.ibm.com";
 
 /** chrome.storage.local key for the recent-snapshot index. */
 export const RECENT_SNAPSHOTS_KEY = "recentSnapshots";

@@ -7,12 +7,22 @@
 
 // ─── Payload types ────────────────────────────────────────────────────────────
 
-/** Raw JSON body of a GET /agents or GET /agents/{id} response. */
+/**
+ * Agent payload — the JSON body of `GET /agents/{id}` (response) or of
+ * `PATCH /agents/{id}` (request body; the response is 204 No Content).
+ */
 export interface AgentPayload {
-  /** The raw API response object (already credential-scrubbed). */
+  /** The raw API object (already credential-scrubbed). May lack `id` when it
+   *  came from a PATCH request body — the assembler falls back to `sourceUrl`. */
   data: Record<string, unknown>;
-  /** The full URL the response came from, for extracting tenant/agent info. */
+  /** The full request URL, for extracting the agent uuid. */
   sourceUrl: string;
+  /**
+   * Tenant hint from the content script: the `x-ibm-wo-tenant-id` session
+   * cookie value, else the page hostname. Used only when the payload itself has
+   * no `tenant_id` (true on some tenants). Never a credential.
+   */
+  tenantHint?: string;
 }
 
 /** Raw JSON body of a GET /tools, GET /tools/{id}, or POST /tools response. */
@@ -36,10 +46,12 @@ export interface KBMetaPayload {
   sourceUrl: string;
 }
 
-/** Binary file extracted from a multipart POST to /knowledge-bases/{id}/documents
- *  or a multipart POST /tools (OpenAPI spec). */
+/** Binary file captured from a KB document upload (`POST …/knowledge-bases/documents`
+ *  create+first-doc, or `PUT …/knowledge-bases/{id}/documents`). */
 export interface KBFilePayload {
-  /** Knowledge base ID extracted from the URL (empty string for tool spec uploads). */
+  /** Knowledge base uuid — from the URL (PUT) or from the create response's
+   *  `knowledge_base` field. Empty string only when the capturing path could not
+   *  observe the response; the assembler then buffers the file until the KB is known. */
   kbId: string;
   filename: string;
   contentType: string;
@@ -60,6 +72,8 @@ export type ExtensionMessage =
   | { type: "AGENT_CAPTURED"; payload: AgentPayload }
   | { type: "TOOL_CAPTURED"; payload: ToolPayload }
   | { type: "CONNECTION_CAPTURED"; payload: ConnectionPayload }
+  /** All connections from one connections/applications response, in a single message. */
+  | { type: "CONNECTION_BATCH_CAPTURED"; payload: ConnectionPayload[] }
   | { type: "KB_META_CAPTURED"; payload: KBMetaPayload }
   | { type: "KB_FILE_CAPTURED"; payload: KBFilePayload }
   | { type: "TOOL_FILE_CAPTURED"; payload: ToolFilePayload }
@@ -76,6 +90,7 @@ export function isExtensionMessage(value: unknown): value is ExtensionMessage {
       "AGENT_CAPTURED",
       "TOOL_CAPTURED",
       "CONNECTION_CAPTURED",
+      "CONNECTION_BATCH_CAPTURED",
       "KB_META_CAPTURED",
       "KB_FILE_CAPTURED",
       "TOOL_FILE_CAPTURED",

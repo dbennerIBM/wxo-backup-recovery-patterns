@@ -12,7 +12,6 @@ import type {
   SnapshotAgent,
   SnapshotFile,
   SnapshotKnowledgeBase,
-  SnapshotTool,
 } from "../shared";
 import type {
   AgentPayload,
@@ -30,11 +29,21 @@ import {
 } from "../shared";
 import { buildZip } from "../shared/zip";
 import { mergeSettings, SETTINGS_STORAGE_KEY } from "../shared/settings";
+import {
+  agentIdFromUrl,
+  dedupFiles,
+  extractToolIds,
+  extractToolsFromPayload,
+  pickTenant,
+  tenantFromToolsPayload,
+  UNKNOWN_TENANT,
+} from "../shared/capture";
 
 export type SnapshotEventType =
   | "AGENT_CAPTURED"
   | "TOOL_CAPTURED"
   | "CONNECTION_CAPTURED"
+  | "CONNECTION_BATCH_CAPTURED"
   | "KB_META_CAPTURED"
   | "KB_FILE_CAPTURED"
   | "SNAPSHOT_READY";
@@ -47,6 +56,7 @@ export interface SnapshotAssemblerEvents {
         T extends "AGENT_CAPTURED" ? AgentPayload
         : T extends "TOOL_CAPTURED" ? ToolPayload
         : T extends "CONNECTION_CAPTURED" ? ConnectionPayload
+        : T extends "CONNECTION_BATCH_CAPTURED" ? ConnectionPayload[]
         : T extends "KB_META_CAPTURED" ? KBMetaPayload
         : T extends "KB_FILE_CAPTURED" ? KBFilePayload
         : SnapshotReadyPayload,
@@ -72,6 +82,32 @@ type SnapshotReadyListener = (agentId: string, snapshot: AgentSnapshot) => void;
 const debounceTimers = new Map<string, number>();
 const snapshotReadyListeners: SnapshotReadyListener[] = [];
 
+/** Proxy hosts to try in order — localhost first, then 127.0.0.1 as fallback. */
+const PROXY_HOSTS = ["localhost", "127.0.0.1"] as const;
+
+/**
+ * Try a fetch against localhost first, then 127.0.0.1 if the first attempt
+ * fails with a network error. Returns the first successful Response, or
+ * throws the last error if both fail.
+ */
+async function tryFetch(
+  port: number,
+  path: string,
+  options?: RequestInit,
+): Promise<Response> {
+  let lastError: unknown;
+  for (const host of PROXY_HOSTS) {
+    try {
+      const url = `http://${host}:${port}${path}`;
+      return await fetch(url, options);
+    } catch (err) {
+      lastError = err;
+      // Network error — try next host
+    }
+  }
+  throw lastError;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -91,6 +127,7 @@ function cloneSnapshot(snapshot: AgentSnapshot): AgentSnapshot {
     agent: {
       ...snapshot.agent,
       guidelines: [...snapshot.agent.guidelines],
+      tools: [...(snapshot.agent.tools ?? [])],
       knowledge_base: [...snapshot.agent.knowledge_base],
       collaborators: [...snapshot.agent.collaborators],
     },
@@ -113,6 +150,7 @@ function createEmptySnapshot(agentId: string): AgentSnapshot {
     id: agentId,
     name: "",
     guidelines: [],
+    tools: [],
     knowledge_base: [],
     collaborators: [],
     tags: null,
@@ -183,7 +221,6 @@ async function postSnapshotToProxy(
   snapshot: AgentSnapshot,
   port: number,
 ): Promise<boolean> {
-  const url = `http://localhost:${port}/snapshots`;
   let zipBytes: Uint8Array;
   try {
     zipBytes = buildZip(snapshot);
@@ -192,7 +229,7 @@ async function postSnapshotToProxy(
     return false;
   }
   try {
-    const res = await fetch(url, {
+    const res = await tryFetch(port, "/snapshots", {
       method: "POST",
       headers: { "Content-Type": "application/zip" },
       body: zipBytes,
@@ -201,6 +238,15 @@ async function postSnapshotToProxy(
       console.warn(`[wxo-autosave] proxy POST returned ${res.status}`);
       return false;
     }
+    let key = "";
+    try {
+      const body = (await res.json()) as { key?: unknown };
+      if (typeof body.key === "string") key = body.key;
+    } catch { /* body optional */ }
+    console.info(
+      `[wxo-autosave] snapshot uploaded (${zipBytes.byteLength} bytes)` +
+        (key ? ` → ${key}` : ""),
+    );
     return true;
   } catch (err) {
     // Proxy offline — swallow; do not crash the service worker.
@@ -243,8 +289,13 @@ function upsertConnection(items: ConnectionMeta[], item: ConnectionMeta): Connec
   return items;
 }
 
-function extractAgentId(data: Record<string, unknown>): string | null {
-  return typeof data["id"] === "string" ? data["id"] : null;
+/**
+ * Agent uuid: `id` on the payload (GET response), else the last path segment of
+ * the source URL (PATCH request body — the 204 response has no body).
+ */
+function extractAgentId(data: Record<string, unknown>, sourceUrl: string): string | null {
+  if (typeof data["id"] === "string" && data["id"] !== "") return data["id"];
+  return agentIdFromUrl(sourceUrl);
 }
 
 function extractKnowledgeBaseIds(data: Record<string, unknown>): string[] {
@@ -256,6 +307,7 @@ function toSnapshotAgent(data: Record<string, unknown>, agentId: string): Snapsh
     id: agentId,
     name: typeof data["name"] === "string" ? data["name"] : "",
     guidelines: asArray(data["guidelines"]),
+    tools: extractToolIds(data),
     knowledge_base: extractKnowledgeBaseIds(data),
     collaborators: asArray(data["collaborators"]),
     tags: data["tags"] ?? null,
@@ -269,41 +321,6 @@ function toSnapshotAgent(data: Record<string, unknown>, agentId: string): Snapsh
   if (typeof data["style"] === "string") agent.style = data["style"];
 
   return agent;
-}
-
-function toSnapshotTool(data: Record<string, unknown>): SnapshotTool | null {
-  if (typeof data["id"] !== "string" || typeof data["name"] !== "string") {
-    return null;
-  }
-
-  const tool: SnapshotTool = {
-    id: data["id"],
-    name: data["name"],
-  };
-
-  if (typeof data["description"] === "string") tool.description = data["description"];
-  if (data["binding"] !== undefined) tool.binding = data["binding"];
-
-  return tool;
-}
-
-function extractToolsFromPayload(data: Record<string, unknown>): SnapshotTool[] {
-  if (Array.isArray(data["toolsSelected"])) {
-    return data["toolsSelected"]
-      .filter(isRecord)
-      .map(toSnapshotTool)
-      .filter((tool): tool is SnapshotTool => tool !== null);
-  }
-
-  if (Array.isArray(data["items"])) {
-    return data["items"]
-      .filter(isRecord)
-      .map(toSnapshotTool)
-      .filter((tool): tool is SnapshotTool => tool !== null);
-  }
-
-  const single = toSnapshotTool(data);
-  return single === null ? [] : [single];
 }
 
 function toSnapshotFile(payload: KBFilePayload): SnapshotFile {
@@ -346,7 +363,7 @@ async function emitSnapshotReady(
       proxyUrl: `http://localhost:${proxyPort}/snapshots`,
     };
     await appendRecentSnapshot(entry);
-    console.debug("[wxo-autosave] snapshot saved", agentId, snapshot.capturedAt);
+    console.info("[wxo-autosave] snapshot saved", agentId, snapshot.tenant, snapshot.capturedAt);
   }
 }
 
@@ -401,8 +418,21 @@ function attachFilesToKnowledgeBase(
 
   snapshot.knowledgeBases[kbIndex] = {
     ...snapshot.knowledgeBases[kbIndex],
-    files: [...snapshot.knowledgeBases[kbIndex].files, ...files],
+    files: dedupFiles(snapshot.knowledgeBases[kbIndex].files, files),
   };
+}
+
+/** Most recently touched agent snapshot — the "single active agent" (§ 9). */
+function latestAgentId(snapshots: SnapshotMap): string | null {
+  let best: string | null = null;
+  let bestTs = "";
+  for (const [agentId, snapshot] of Object.entries(snapshots)) {
+    if (best === null || snapshot.capturedAt > bestTs) {
+      best = agentId;
+      bestTs = snapshot.capturedAt;
+    }
+  }
+  return best;
 }
 
 async function flushPendingKbFiles(agentId: string, kbIds: string[]): Promise<void> {
@@ -429,19 +459,24 @@ async function handleAgentCaptured(
   events: SnapshotAssemblerEvents,
   payload: AgentPayload,
 ): Promise<void> {
-  const agentId = extractAgentId(payload.data);
+  const agentId = extractAgentId(payload.data, payload.sourceUrl);
   if (!agentId) return;
 
   const kbIds = extractKnowledgeBaseIds(payload.data);
 
   await upsertSnapshot(agentId, (snapshot) => {
-    snapshot.tenant = typeof payload.data["tenant_id"] === "string"
-      ? payload.data["tenant_id"]
-      : snapshot.tenant;
+    snapshot.tenant = pickTenant(payload.data["tenant_id"], snapshot.tenant, payload.tenantHint);
     snapshot.agent = toSnapshotAgent(payload.data, agentId);
 
+    // toolsSelected[] (populated on GET; often empty on PATCH bodies) — upsert
+    // whatever binding detail is present without wiping tools we already hold.
     for (const tool of extractToolsFromPayload(payload.data)) {
       upsertById(snapshot.tools, tool);
+    }
+    // Drop tools the agent no longer references.
+    const referenced = new Set(snapshot.agent.tools);
+    if (referenced.size > 0) {
+      snapshot.tools = snapshot.tools.filter((tool) => referenced.has(tool.id));
     }
 
     return snapshot;
@@ -457,18 +492,27 @@ async function handleToolCaptured(
 ): Promise<void> {
   const tools = extractToolsFromPayload(payload.data);
   if (tools.length === 0) return;
+  const toolTenant = tenantFromToolsPayload(payload.data);
 
   const snapshots = await readSnapshots();
   let updated = false;
 
   for (const [agentId, snapshot] of Object.entries(snapshots)) {
-    const toolIds = new Set(snapshot.tools.map((tool) => tool.id));
+    // A tool belongs to this agent if the agent references it by id
+    // (`tools[]` on the agent payload) or we already hold it from toolsSelected.
+    const toolIds = new Set([
+      ...snapshot.tools.map((tool) => tool.id),
+      ...(snapshot.agent.tools ?? []),
+    ]);
     const matching = tools.filter((tool) => toolIds.has(tool.id));
     if (matching.length === 0) continue;
 
     const next = cloneSnapshot(snapshot);
     for (const tool of matching) {
       upsertById(next.tools, tool);
+    }
+    if (toolTenant !== null && (next.tenant === "" || next.tenant === UNKNOWN_TENANT)) {
+      next.tenant = toolTenant;
     }
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
@@ -481,36 +525,48 @@ async function handleToolCaptured(
   }
 }
 
-async function handleConnectionCaptured(
+/** app_ids referenced by any tool binding on the snapshot (python + mcp). */
+function referencedConnectionAppIds(snapshot: AgentSnapshot): Set<string> {
+  const ids = new Set<string>();
+  for (const tool of snapshot.tools) {
+    if (!isRecord(tool.binding)) continue;
+    for (const kind of ["python", "mcp"] as const) {
+      const branch = tool.binding[kind];
+      if (!isRecord(branch)) continue;
+      const connections = branch["connections"];
+      if (!isRecord(connections)) continue;
+      for (const appId of Object.keys(connections)) ids.add(appId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Handle one or many connection records in a single read-modify-write.
+ * (The connections list is ~200 records; processing them as independent
+ * concurrent handlers raced on chrome.storage.session and lost updates.)
+ */
+async function handleConnectionsCaptured(
   events: SnapshotAssemblerEvents,
-  payload: ConnectionPayload,
+  payloads: ConnectionPayload[],
 ): Promise<void> {
+  if (payloads.length === 0) return;
   const snapshots = await readSnapshots();
   let updated = false;
 
   for (const [agentId, snapshot] of Object.entries(snapshots)) {
-    const referencesConnection = snapshot.tools.some((tool) => {
-      if (!isRecord(tool.binding)) return false;
-      for (const kind of ["python", "mcp"] as const) {
-        const branch = tool.binding[kind];
-        if (!isRecord(branch)) continue;
-        const connections = branch["connections"];
-        if (!isRecord(connections)) continue;
-        if (Object.prototype.hasOwnProperty.call(connections, payload.app_id)) {
-          return true;
-        }
-      }
-      return false;
-    });
-
-    if (!referencesConnection) continue;
+    const referenced = referencedConnectionAppIds(snapshot);
+    const matching = payloads.filter((p) => referenced.has(p.app_id));
+    if (matching.length === 0) continue;
 
     const next = cloneSnapshot(snapshot);
-    upsertConnection(next.connections, {
-      app_id: payload.app_id,
-      kind: payload.kind,
-      ...(payload.server_url ? { server_url: payload.server_url } : {}),
-    });
+    for (const payload of matching) {
+      upsertConnection(next.connections, {
+        app_id: payload.app_id,
+        kind: payload.kind,
+        ...(payload.server_url ? { server_url: payload.server_url } : {}),
+      });
+    }
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
     updated = true;
@@ -534,7 +590,12 @@ async function handleKbMetaCaptured(
   let updated = false;
 
   for (const [agentId, snapshot] of Object.entries(snapshots)) {
-    if (!snapshot.agent.knowledge_base.includes(kbId)) continue;
+    // Owned by this agent, or already attached (files can arrive before the
+    // agent PATCH that lists the new KB).
+    const owned =
+      snapshot.agent.knowledge_base.includes(kbId) ||
+      snapshot.knowledgeBases.some((kb) => kb.id === kbId);
+    if (!owned) continue;
 
     const next = cloneSnapshot(snapshot);
     const existing = next.knowledgeBases.find((kb) => kb.id === kbId);
@@ -570,8 +631,7 @@ async function handleKbFileCaptured(
 
   if (payload.kbId === "") {
     const snapshots = await readSnapshots();
-    const agentIds = Object.keys(snapshots);
-    const agentId = agentIds[agentIds.length - 1];
+    const agentId = latestAgentId(snapshots);
     if (!agentId) return;
 
     const pending = await readPendingKbFiles();
@@ -591,11 +651,29 @@ async function handleKbFileCaptured(
   let updated = false;
 
   for (const [agentId, snapshot] of Object.entries(snapshots)) {
-    if (!snapshot.agent.knowledge_base.includes(payload.kbId)) continue;
+    const owned =
+      snapshot.agent.knowledge_base.includes(payload.kbId) ||
+      snapshot.knowledgeBases.some((kb) => kb.id === payload.kbId);
+    if (!owned) continue;
 
     const next = cloneSnapshot(snapshot);
     attachFilesToKnowledgeBase(next, payload.kbId, [file]);
 
+    next.capturedAt = new Date().toISOString();
+    snapshots[agentId] = next;
+    updated = true;
+    scheduleSnapshotReady(events, agentId);
+  }
+
+  // A brand-new KB: the file (with its uuid from the 201 response) arrives
+  // before the agent PATCH that lists it. Attach to the active agent now; the
+  // later AGENT_CAPTURED / KB_META_CAPTURED will confirm ownership and add meta.
+  // Files cannot be re-fetched, so this is not deferred (single-agent session, § 9).
+  if (!updated) {
+    const agentId = latestAgentId(snapshots);
+    if (!agentId) return;
+    const next = cloneSnapshot(snapshots[agentId]!);
+    attachFilesToKnowledgeBase(next, payload.kbId, [file]);
     next.capturedAt = new Date().toISOString();
     snapshots[agentId] = next;
     updated = true;
@@ -611,24 +689,40 @@ export function onSnapshotReady(listener: SnapshotReadyListener): void {
   snapshotReadyListeners.push(listener);
 }
 
+/**
+ * All handlers perform read-modify-write on chrome.storage.session. Events can
+ * arrive in bursts (paginated tool fetches, 200+ connections, KB polling), so
+ * they are serialised through one promise chain to prevent lost updates.
+ */
+let queue: Promise<void> = Promise.resolve();
+function enqueue(task: () => Promise<void>): void {
+  queue = queue.then(task, task).catch((err) => {
+    console.error("[wxo-autosave] assembler handler failed", err);
+  });
+}
+
 export function registerAssembler(events: SnapshotAssemblerEvents): void {
   events.on("AGENT_CAPTURED", (payload) => {
-    void handleAgentCaptured(events, payload);
+    enqueue(() => handleAgentCaptured(events, payload));
   });
 
   events.on("TOOL_CAPTURED", (payload) => {
-    void handleToolCaptured(events, payload);
+    enqueue(() => handleToolCaptured(events, payload));
   });
 
   events.on("CONNECTION_CAPTURED", (payload) => {
-    void handleConnectionCaptured(events, payload);
+    enqueue(() => handleConnectionsCaptured(events, [payload]));
+  });
+
+  events.on("CONNECTION_BATCH_CAPTURED", (payloads) => {
+    enqueue(() => handleConnectionsCaptured(events, payloads));
   });
 
   events.on("KB_META_CAPTURED", (payload) => {
-    void handleKbMetaCaptured(events, payload);
+    enqueue(() => handleKbMetaCaptured(events, payload));
   });
 
   events.on("KB_FILE_CAPTURED", (payload) => {
-    void handleKbFileCaptured(events, payload);
+    enqueue(() => handleKbFileCaptured(events, payload));
   });
 }

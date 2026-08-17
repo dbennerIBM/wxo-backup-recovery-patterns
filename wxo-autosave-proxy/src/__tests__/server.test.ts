@@ -120,3 +120,21 @@ describe("Route dispatch", () => {
     expect(matchRoute("PUT",    "/restore")).toBe("404");
   });
 });
+
+// ─── pathSegment — storage key hygiene ───────────────────────────────────────
+
+import { pathSegment } from "../server.js";
+
+describe("pathSegment — never an empty or slash-containing key segment", () => {
+  it("returns the trimmed value when present", () => {
+    expect(pathSegment("  tenant-a ", "x")).toBe("tenant-a");
+  });
+  it("falls back when empty / non-string (agent payloads without tenant_id)", () => {
+    expect(pathSegment("", "unknown-tenant")).toBe("unknown-tenant");
+    expect(pathSegment("   ", "unknown-tenant")).toBe("unknown-tenant");
+    expect(pathSegment(undefined, "unknown-tenant")).toBe("unknown-tenant");
+  });
+  it("replaces slashes so a segment cannot create extra path levels", () => {
+    expect(pathSegment("a/b\\c", "x")).toBe("a_b_c");
+  });
+});
