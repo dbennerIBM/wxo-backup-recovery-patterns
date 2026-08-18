@@ -75,20 +75,23 @@ function handleCors(
 ): boolean {
   const origin = req.headers["origin"] ?? "";
 
+
   // Allow any chrome-extension:// origin when the configured value is the
   // bare scheme (default), or require an exact match when a full ID is set.
   //
-  // An empty Origin is NOT accepted (SEC-4). Extension contexts — the MV3
-  // service worker and the popup — always send `Origin: chrome-extension://…`
-  // on cross-origin fetches, so only non-browser clients (curl, scripts) lack
-  // it, and those must not reach /restore. The one exception is the
-  // GET /health liveness probe, handled before this function in createProxyServer.
+  // Chrome extension popups may not send an Origin header on GET requests,
+  // so allow empty-origin GETs for read-only endpoints (SEC-4 still blocks
+  // empty-origin POSTs which mutate state).
+  const isReadOnly = req.method === "GET" || req.method === "OPTIONS";
   const originOk =
-    allowedOrigin === "chrome-extension://"
-      ? origin.startsWith("chrome-extension://")
-      : origin === allowedOrigin;
+    (origin === "" && isReadOnly)
+      ? true
+      : allowedOrigin === "chrome-extension://"
+        ? origin.startsWith("chrome-extension://")
+        : origin === allowedOrigin;
 
   if (!originOk) {
+    console.log(`[wxo-proxy] CORS REJECTED — origin: "${origin}"`);
     // Still handle OPTIONS so browsers don't see a connection error, but
     // omit CORS headers so the browser blocks the request.
     if (req.method === "OPTIONS") {
