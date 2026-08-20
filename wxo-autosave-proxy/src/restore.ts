@@ -8,7 +8,8 @@
  * popup can stream per-item progress.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -24,6 +25,7 @@ import {
   readToolSource,
 } from "./zip.js";
 import type { ParsedZip } from "./zip.js";
+import { toAdkAgentSpec, toAdkConnectionSpec, toAdkKnowledgeBaseSpec } from "./transform.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,20 +39,42 @@ export interface RestoreLogEntry {
 
 // ─── ADK CLI helper ───────────────────────────────────────────────────────────
 
+const execFileAsync = promisify(execFile);
+
 /**
- * Run an ADK CLI command synchronously.
- * Returns stdout on success, throws with stderr on failure.
+ * Extract a human-readable failure reason from an execFile error.
+ *
+ * Exported for tests. Beware: `stderr` is an empty *string* (not undefined)
+ * on spawn failures such as ENOENT, and some CLIs print errors to stdout —
+ * so pick the first non-empty of stderr / stdout / message. Long CLI output
+ * is trimmed to its tail, where the actual error line lives.
  */
-function runAdkCommand(args: string[]): string {
+export function extractAdkErrorDetail(err: unknown): string {
+  const e = err as { stderr?: string; stdout?: string; message?: string };
+  const detail =
+    [e.stderr, e.stdout, e.message]
+      .map((s) => (typeof s === "string" ? s.trim() : ""))
+      .find((s) => s.length > 0) ?? String(err);
+  const MAX = 600;
+  return detail.length > MAX ? `…${detail.slice(-MAX)}` : detail;
+}
+
+/**
+ * Run an ADK CLI command asynchronously (so the server can stream progress
+ * between artefacts instead of blocking the event loop).
+ * Returns stdout on success, throws with the CLI's error output on failure.
+ */
+async function runAdkCommand(args: string[]): Promise<string> {
   try {
-    const output = execFileSync("orchestrate", args, {
+    const { stdout } = await execFileAsync("orchestrate", args, {
       encoding: "utf-8",
       timeout:  60_000,   // 60 s per artefact
     });
-    return output;
+    return stdout;
   } catch (err) {
-    const e = err as { stderr?: string; message?: string };
-    throw new Error(e.stderr ?? e.message ?? String(err));
+    const detail = extractAdkErrorDetail(err);
+    console.error(`[wxo-proxy] ADK command failed: orchestrate ${args.join(" ")}\n${detail}`);
+    throw new Error(detail);
   }
 }
 
@@ -68,32 +92,69 @@ function writeTempFile(dir: string, filename: string, contents: Uint8Array | str
   return path;
 }
 
+/** Decode and JSON-parse a zip entry (snapshot .yaml files are JSON-encoded). */
+function readEntryJson(
+  entries: ParsedZip["entries"],
+  path: string,
+): Record<string, unknown> | null {
+  const data = entries[path];
+  if (!data) return null;
+  try {
+    return JSON.parse(new TextDecoder().decode(data)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Per-artefact restore functions ───────────────────────────────────────────
 
-function restoreConnection(
+async function restoreConnection(
   entries: ParsedZip["entries"],
   name: string,
   tempDir: string,
-): RestoreLogEntry {
+): Promise<RestoreLogEntry> {
   const meta = readConnectionMeta(entries, name);
   if (!meta) {
     return { artefact: `connection:${name}`, status: "error", message: "Could not read connection metadata from zip" };
   }
 
-  const yamlPath = writeTempFile(tempDir, `${name}.yaml`, JSON.stringify(meta, null, 2));
+  const spec = toAdkConnectionSpec(meta);
+
+  // Unknown auth scheme (e.g. MCP toolkit connections, captured kind "") —
+  // no import spec can express it, but `connections add` still recreates the
+  // app_id so dependent tool imports succeed.
+  if (!spec) {
+    try {
+      await runAdkCommand(["connections", "add", "--app-id", meta.app_id]);
+      return {
+        artefact: `connection:${meta.app_id}`,
+        status: "ok",
+        message: "Created without auth configuration (unknown auth scheme) — configure the connection and re-enter credentials in wxO",
+      };
+    } catch (err) {
+      // `connections add` is not idempotent: a 409 means it already exists,
+      // which is fine for restore purposes (FR-5.11).
+      if (String(err).includes("already exists")) {
+        return { artefact: `connection:${meta.app_id}`, status: "skipped", message: "Connection already exists" };
+      }
+      return { artefact: `connection:${meta.app_id}`, status: "error", message: String(err) };
+    }
+  }
+
+  const yamlPath = writeTempFile(tempDir, `${name}.yaml`, JSON.stringify(spec, null, 2));
   try {
-    runAdkCommand(["connections", "import", "--file", yamlPath]);
-    return { artefact: `connection:${meta.app_id}`, status: "ok", message: "Imported" };
+    await runAdkCommand(["connections", "import", "--file", yamlPath]);
+    return { artefact: `connection:${meta.app_id}`, status: "ok", message: "Imported — re-enter credentials in wxO" };
   } catch (err) {
     return { artefact: `connection:${meta.app_id}`, status: "error", message: String(err) };
   }
 }
 
-function restoreTool(
+async function restoreTool(
   entries: ParsedZip["entries"],
   toolName: string,
   tempDir: string,
-): RestoreLogEntry {
+): Promise<RestoreLogEntry> {
   const meta = readToolMeta(entries, toolName);
   const label = `tool:${meta?.name ?? toolName}`;
 
@@ -106,13 +167,19 @@ function restoreTool(
     return { artefact: label, status: "skipped", message: "No source file in zip — skipped" };
   }
 
-  const sourcePath = writeTempFile(tempDir, source.filename, source.bytes);
+  // Per-tool subdirectory — every python tool's source is named source.py,
+  // so writing them all into tempDir directly would collide.
+  const toolDir = join(tempDir, `tool-${toolName}`);
+  mkdirSync(toolDir, { recursive: true });
+  const sourcePath = writeTempFile(toolDir, source.filename, source.bytes);
 
   // Write requirements.txt if present alongside source.py.
   const reqData = entries[`tools/${toolName}/requirements.txt`];
-  const reqPath  = reqData ? writeTempFile(tempDir, "requirements.txt", reqData) : undefined;
+  const reqPath  = reqData ? writeTempFile(toolDir, "requirements.txt", reqData) : undefined;
 
-  const args = ["tools", "import", "--kind", "python", "--file", sourcePath];
+  // source.py → python tool; spec.yaml → OpenAPI tool.
+  const kind = source.filename === "spec.yaml" ? "openapi" : "python";
+  const args = ["tools", "import", "--kind", kind, "--file", sourcePath];
   if (reqPath) {
     args.push("--requirements", reqPath);
   }
@@ -121,65 +188,80 @@ function restoreTool(
   }
 
   try {
-    runAdkCommand(args);
+    await runAdkCommand(args);
     return { artefact: label, status: "ok", message: "Imported" };
   } catch (err) {
     return { artefact: label, status: "error", message: String(err) };
   }
 }
 
-function restoreKnowledgeBase(
+async function restoreKnowledgeBase(
   entries: ParsedZip["entries"],
   kbId: string,
   tempDir: string,
-): RestoreLogEntry[] {
-  const log: RestoreLogEntry[] = [];
+): Promise<RestoreLogEntry[]> {
   const label = `knowledge_base:${kbId}`;
 
-  // Import the KB spec.
-  const kbYamlPath = writeTempFile(
-    tempDir,
-    `${kbId}-kb.yaml`,
-    entries[`knowledge_bases/${kbId}/kb.yaml`] ?? new Uint8Array(),
-  );
-
-  try {
-    runAdkCommand(["knowledge-bases", "import", "--file", kbYamlPath]);
-    log.push({ artefact: label, status: "ok", message: "KB spec imported" });
-  } catch (err) {
-    log.push({ artefact: label, status: "error", message: String(err) });
-    return log; // no point uploading documents if KB import failed
+  const rawMeta = readEntryJson(entries, `knowledge_bases/${kbId}/kb.yaml`);
+  if (!rawMeta) {
+    return [{ artefact: label, status: "error", message: "Could not read kb.yaml from zip" }];
   }
 
-  // Upload documents.
-  const docs = listKbDocuments(entries, kbId);
-  for (const filename of docs) {
+  // Write the captured documents to disk first — the ADK imports a KB and its
+  // documents in one step, from a spec whose `documents` lists file paths.
+  const docDir = join(tempDir, `kb-${kbId}-docs`);
+  mkdirSync(docDir, { recursive: true });
+  const documentPaths: string[] = [];
+  for (const filename of listKbDocuments(entries, kbId)) {
     const bytes = readKbDocument(entries, kbId, filename);
     if (!bytes) continue;
-    const docPath = writeTempFile(tempDir, filename, bytes);
-    try {
-      runAdkCommand(["knowledge-bases", "upload-document", "--kb-id", kbId, "--file", docPath]);
-      log.push({ artefact: `${label}/document:${filename}`, status: "ok", message: "Uploaded" });
-    } catch (err) {
-      log.push({ artefact: `${label}/document:${filename}`, status: "error", message: String(err) });
-    }
+    documentPaths.push(writeTempFile(docDir, filename, bytes));
   }
 
-  return log;
+  // A built-in (Milvus) KB cannot be imported without documents.
+  if (documentPaths.length === 0) {
+    return [{ artefact: label, status: "skipped", message: "No captured documents — built-in knowledge bases cannot be imported empty" }];
+  }
+
+  try {
+    const { spec } = toAdkKnowledgeBaseSpec(rawMeta, documentPaths);
+    const kbYamlPath = writeTempFile(tempDir, `${kbId}-kb.yaml`, JSON.stringify(spec, null, 2));
+    await runAdkCommand(["knowledge-bases", "import", "--file", kbYamlPath]);
+    return [{ artefact: label, status: "ok", message: `Imported with ${documentPaths.length} document(s)` }];
+  } catch (err) {
+    return [{ artefact: label, status: "error", message: String(err) }];
+  }
 }
 
-function restoreAgent(
+async function restoreAgent(
   entries: ParsedZip["entries"],
   tempDir: string,
-): RestoreLogEntry {
-  const agentYaml = entries["agent/agent.yaml"];
-  if (!agentYaml) {
+): Promise<RestoreLogEntry> {
+  const rawAgent = readEntryJson(entries, "agent/agent.yaml");
+  if (!rawAgent) {
     return { artefact: "agent", status: "error", message: "agent/agent.yaml not found in zip" };
   }
-  const yamlPath = writeTempFile(tempDir, "agent.yaml", agentYaml);
+
+  // The captured payload references tools and KBs by uuid; the ADK spec wants
+  // names. Build the uuid → name maps from the zip's own metadata files.
+  const toolIdToName = new Map<string, string>();
+  for (const toolName of listToolNames(entries)) {
+    const meta = readToolMeta(entries, toolName);
+    if (meta?.id && meta.name) toolIdToName.set(meta.id, meta.name);
+  }
+  const kbIdToName = new Map<string, string>();
+  for (const kbId of listKbIds(entries)) {
+    const meta = readEntryJson(entries, `knowledge_bases/${kbId}/kb.yaml`);
+    const kbName = typeof meta?.["name"] === "string" ? (meta["name"] as string) : null;
+    if (kbName) kbIdToName.set(kbId, kbName);
+  }
+
   try {
-    runAdkCommand(["agents", "import", "--file", yamlPath]);
-    return { artefact: "agent", status: "ok", message: "Imported" };
+    const { spec, warnings } = toAdkAgentSpec(rawAgent, toolIdToName, kbIdToName);
+    const yamlPath = writeTempFile(tempDir, "agent.yaml", JSON.stringify(spec, null, 2));
+    await runAdkCommand(["agents", "import", "--file", yamlPath]);
+    const message = warnings.length ? `Imported (${warnings.join("; ")})` : "Imported";
+    return { artefact: "agent", status: "ok", message };
   } catch (err) {
     return { artefact: "agent", status: "error", message: String(err) };
   }
@@ -190,30 +272,43 @@ function restoreAgent(
 /**
  * Execute the full restore from an unpacked zip, in dependency order.
  * Returns a structured log entry per artefact (FR-5.10).
+ *
+ * When `onEntry` is provided it is invoked with each log entry as soon as its
+ * artefact finishes, so the server can stream live progress to the popup.
  */
-export async function restoreFromZip(zip: ParsedZip): Promise<RestoreLogEntry[]> {
+export async function restoreFromZip(
+  zip: ParsedZip,
+  onEntry?: (entry: RestoreLogEntry) => void,
+): Promise<RestoreLogEntry[]> {
   const { entries } = zip;
   const log: RestoreLogEntry[] = [];
   const tempDir = createTempDir();
 
+  const record = (entry: RestoreLogEntry): void => {
+    log.push(entry);
+    onEntry?.(entry);
+  };
+
   try {
     // 1. Connections
     for (const name of listConnectionNames(entries)) {
-      log.push(restoreConnection(entries, name, tempDir));
+      record(await restoreConnection(entries, name, tempDir));
     }
 
     // 2. Tools
     for (const toolName of listToolNames(entries)) {
-      log.push(restoreTool(entries, toolName, tempDir));
+      record(await restoreTool(entries, toolName, tempDir));
     }
 
     // 3. Knowledge bases
     for (const kbId of listKbIds(entries)) {
-      log.push(...restoreKnowledgeBase(entries, kbId, tempDir));
+      for (const entry of await restoreKnowledgeBase(entries, kbId, tempDir)) {
+        record(entry);
+      }
     }
 
     // 4. Agent
-    log.push(restoreAgent(entries, tempDir));
+    record(await restoreAgent(entries, tempDir));
 
   } finally {
     // Always clean up temp files.

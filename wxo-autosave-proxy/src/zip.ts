@@ -182,12 +182,13 @@ export function readKbDocument(
   return entries[`knowledge_bases/${kbId}/documents/${filename}`] ?? null;
 }
 
-/** Read raw bytes for a tool source file (source.py or spec.yaml). */
+/** Read raw bytes for a tool source file (source.py or spec.yaml).
+ *  requirements.txt is a dependency manifest, not source — handled separately. */
 export function readToolSource(
   entries: Record<string, Uint8Array>,
   toolName: string,
 ): { filename: string; bytes: Uint8Array } | null {
-  for (const candidate of ["source.py", "spec.yaml", "requirements.txt"]) {
+  for (const candidate of ["source.py", "spec.yaml"]) {
     const path = `tools/${toolName}/${candidate}`;
     const data = entries[path];
     if (data) return { filename: candidate, bytes: data };

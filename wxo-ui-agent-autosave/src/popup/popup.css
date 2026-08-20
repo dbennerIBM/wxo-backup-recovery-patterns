@@ -16,6 +16,16 @@ body {
   background: #ffffff;
   width: 340px;
   min-height: 120px;
+  /* Chrome caps popups at 600px and clips beyond it — scroll instead. */
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+/* While an overlay is open the popup must be tall enough to show the
+   overlay box and its action buttons, even when the underlying content
+   (e.g. a two-row snapshot list) is short. */
+body.overlay-open {
+  min-height: 480px;
 }
 
 /* ── Header ─────────────────────────────────────────────────────────────────── */
@@ -236,8 +246,11 @@ body {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 40px;
+  padding: 24px 12px;
   z-index: 10;
+  /* A tall preflight/progress box must scroll within the popup viewport,
+     not run off the bottom with its buttons unreachable. */
+  overflow-y: auto;
 }
 
 .overlay[hidden] {
@@ -252,6 +265,8 @@ body {
   border-radius: 8px;
   padding: 16px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.10);
+  /* Keeps the box's bottom edge visible when the overlay scrolls. */
+  margin-bottom: 24px;
 }
 
 .overlay-title {

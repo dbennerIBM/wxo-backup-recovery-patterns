@@ -51,9 +51,20 @@ function el<T extends HTMLElement>(id: string): T {
   return node as T;
 }
 
-function show(id: string): void  { el(id).hidden = false; }
-function hide(id: string): void  { el(id).hidden = true; }
+function show(id: string): void  { el(id).hidden = false; syncOverlayClass(); }
+function hide(id: string): void  { el(id).hidden = true; syncOverlayClass(); }
 function text(id: string, value: string): void { el(id).textContent = value; }
+
+/**
+ * Grow the popup (body.overlay-open → min-height) while any overlay is open,
+ * so the overlay box and its action buttons fit even when the underlying
+ * content is only a couple of rows tall.
+ */
+function syncOverlayClass(): void {
+  const open =
+    !el("overlay-preflight").hidden || !el("overlay-progress").hidden;
+  document.body.classList.toggle("overlay-open", open);
+}
 
 /** Format an ISO timestamp as a short human-readable string. */
 function formatTime(iso: string): string {
@@ -368,12 +379,13 @@ async function executeRestore(port: number): Promise<void> {
           if (!trimmed) continue;
           try {
             const event = JSON.parse(trimmed) as { artefact?: string; status?: string; message?: string };
-            const label = event.artefact ?? event.message ?? trimmed;
             const kind  = event.status === "ok" ? "ok"
                         : event.status === "skipped" ? "skip"
                         : event.status === "error" ? "error"
                         : "info";
-            appendProgressItem(label, kind);
+            const symbol = kind === "ok" ? "✓" : kind === "error" ? "✗" : kind === "skip" ? "↷" : "•";
+            const parts  = [event.artefact, event.message].filter(Boolean);
+            appendProgressItem(`${symbol} ${parts.join(" — ") || trimmed}`, kind);
           } catch {
             appendProgressItem(trimmed, "info");
           }

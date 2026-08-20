@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { buildZip, parseZip, readZipText, readZipJson } from "../zip";
+import { buildZip, parseZip, readZipText, readZipJson, snapshotContentDigest } from "../zip";
 import type { AgentSnapshot } from "../index";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -403,5 +403,69 @@ describe("parseZip / readZipText / readZipJson", () => {
     const value = readZipJson(parsed, "manifest.json");
     expect(typeof value).toBe("object");
     expect(value).not.toBeNull();
+  });
+});
+
+// ─── snapshotContentDigest ────────────────────────────────────────────────────
+
+describe("snapshotContentDigest", () => {
+  it("is stable across capturedAt changes (dedup key ignores the timestamp)", async () => {
+    const a = makeSnapshot({ capturedAt: "2026-08-15T12:00:00.000Z" });
+    const b = makeSnapshot({ capturedAt: "2026-08-20T09:30:00.000Z" });
+    expect(await snapshotContentDigest(a)).toBe(await snapshotContentDigest(b));
+  });
+
+  it("changes when snapshot content changes", async () => {
+    const a = makeSnapshot();
+    const b = makeSnapshot();
+    b.agent = { ...b.agent, instructions: "Be extra helpful" };
+    expect(await snapshotContentDigest(a)).not.toBe(await snapshotContentDigest(b));
+  });
+
+  it("does not mutate the snapshot's capturedAt", async () => {
+    const snap = makeSnapshot({ capturedAt: "2026-08-15T12:00:00.000Z" });
+    await snapshotContentDigest(snap);
+    expect(snap.capturedAt).toBe("2026-08-15T12:00:00.000Z");
+  });
+});
+
+// ─── tool source files ────────────────────────────────────────────────────────
+
+describe("buildZip — tool source files", () => {
+  const py = { filename: "my_tool.py", contentType: "text/x-python", bytes: [100, 101, 102] };
+  const req = { filename: "requirements.txt", contentType: "text/plain", bytes: [114, 101] };
+
+  it("writes captured python source as tools/{name}/source.py", () => {
+    const snap = makeSnapshot({
+      tools: [{ id: "t1", name: "local_tool", sourceFile: py, requirementsFile: req }],
+    });
+    const parsed = parseZip(buildZip(snap));
+    expect(Array.from(parsed["tools/local_tool/source.py"] ?? [])).toEqual([100, 101, 102]);
+    expect(Array.from(parsed["tools/local_tool/requirements.txt"] ?? [])).toEqual([114, 101]);
+  });
+
+  it("writes yaml/json specs as spec.yaml", () => {
+    const snap = makeSnapshot({
+      tools: [{ id: "t1", name: "api_tool", sourceFile: { ...py, filename: "openapi.yaml" } }],
+    });
+    const parsed = parseZip(buildZip(snap));
+    expect(parsed["tools/api_tool/spec.yaml"]).toBeDefined();
+    expect(parsed["tools/api_tool/source.py"]).toBeUndefined();
+  });
+
+  it("keeps source bytes out of tool.json", () => {
+    const snap = makeSnapshot({
+      tools: [{ id: "t1", name: "local_tool", sourceFile: py }],
+    });
+    const parsed = parseZip(buildZip(snap));
+    const meta = readZipJson(parsed, "tools/local_tool/tool.json") as Record<string, unknown>;
+    expect(meta["sourceFile"]).toBeUndefined();
+    expect(meta["id"]).toBe("t1");
+  });
+
+  it("tools without captured source produce only tool.json (unchanged)", () => {
+    const parsed = parseZip(buildZip(makeSnapshot()));
+    expect(parsed["tools/my_python_tool/tool.json"]).toBeDefined();
+    expect(parsed["tools/my_python_tool/source.py"]).toBeUndefined();
   });
 });

@@ -18,6 +18,7 @@ import type {
   ConnectionPayload,
   KBFilePayload,
   KBMetaPayload,
+  ToolFilePayload,
   ToolPayload,
 } from "../shared/messages";
 import {
@@ -27,11 +28,13 @@ import {
   SCHEMA_VERSION,
   type SnapshotReadyPayload,
 } from "../shared";
-import { buildZip } from "../shared/zip";
+import { buildZip, snapshotContentDigest } from "../shared/zip";
 import { mergeSettings, SETTINGS_STORAGE_KEY } from "../shared/settings";
 import {
   agentIdFromUrl,
+  agentIdsFromKbMeta,
   dedupFiles,
+  extractSelectedTools,
   extractToolIds,
   extractToolsFromPayload,
   pickTenant,
@@ -46,6 +49,7 @@ export type SnapshotEventType =
   | "CONNECTION_BATCH_CAPTURED"
   | "KB_META_CAPTURED"
   | "KB_FILE_CAPTURED"
+  | "TOOL_FILE_CAPTURED"
   | "SNAPSHOT_READY";
 
 export interface SnapshotAssemblerEvents {
@@ -59,6 +63,7 @@ export interface SnapshotAssemblerEvents {
         : T extends "CONNECTION_BATCH_CAPTURED" ? ConnectionPayload[]
         : T extends "KB_META_CAPTURED" ? KBMetaPayload
         : T extends "KB_FILE_CAPTURED" ? KBFilePayload
+        : T extends "TOOL_FILE_CAPTURED" ? ToolFilePayload
         : SnapshotReadyPayload,
     ) => void,
   ): void;
@@ -67,6 +72,8 @@ export interface SnapshotAssemblerEvents {
 
 const SNAPSHOT_STORAGE_KEY = "agentSnapshots";
 const PENDING_KB_FILES_STORAGE_KEY = "pendingKbFiles";
+const POSTED_DIGESTS_STORAGE_KEY = "postedSnapshotDigests";
+const PENDING_TOOL_SOURCE_STORAGE_KEY = "pendingToolSource";
 
 type SnapshotMap = Record<string, AgentSnapshot>;
 
@@ -323,7 +330,36 @@ function toSnapshotAgent(data: Record<string, unknown>, agentId: string): Snapsh
   return agent;
 }
 
-function toSnapshotFile(payload: KBFilePayload): SnapshotFile {
+/**
+ * Field-level merge of an incoming agent capture over the existing agent.
+ *
+ * Agent captures vary in completeness: PATCH bodies carry the full editable
+ * state, but agents-LIST entries carry only id/name/description. A wholesale
+ * replace let those partial payloads wipe `tools`, `knowledge_base`, `llm`, …
+ * (observed live: snapshots with `knowledge_base: []` moments after a save
+ * that listed a KB). Only fields actually present on the payload win; for
+ * everything else the existing value is kept.
+ */
+function mergeAgentCapture(
+  existing: SnapshotAgent,
+  incoming: SnapshotAgent,
+  data: Record<string, unknown>,
+): SnapshotAgent {
+  const merged: SnapshotAgent = { ...existing, ...incoming };
+  const fields = [
+    "name", "display_name", "description", "instructions", "llm", "style",
+    "guidelines", "tools", "knowledge_base", "collaborators", "tags",
+    "structured_output",
+  ] as const;
+  for (const key of fields) {
+    if (!(key in data)) {
+      (merged as unknown as Record<string, unknown>)[key] = existing[key];
+    }
+  }
+  return merged;
+}
+
+function toSnapshotFile(payload: KBFilePayload | ToolFilePayload): SnapshotFile {
   return {
     filename: payload.filename,
     contentType: payload.contentType,
@@ -348,6 +384,19 @@ async function emitSnapshotReady(
     }
   }
 
+  // Dedup: merely browsing the builder fires GETs that re-capture identical
+  // state on every page view. Only post when the content digest (capturedAt
+  // excluded) differs from the last successfully posted snapshot (FR-3.2).
+  const digest = await snapshotContentDigest(snapshot);
+  const storedDigests = await chrome.storage.session.get(POSTED_DIGESTS_STORAGE_KEY);
+  const digests: Record<string, string> = isRecord(storedDigests[POSTED_DIGESTS_STORAGE_KEY])
+    ? (storedDigests[POSTED_DIGESTS_STORAGE_KEY] as Record<string, string>)
+    : {};
+  if (digests[agentId] === digest) {
+    console.debug("[wxo-autosave] snapshot unchanged — skipping post", agentId);
+    return;
+  }
+
   // Read user-configured port; fall back to default if storage is empty.
   const storedSettings = await chrome.storage.sync.get(SETTINGS_STORAGE_KEY);
   const { proxyPort } = mergeSettings(storedSettings[SETTINGS_STORAGE_KEY]);
@@ -355,6 +404,8 @@ async function emitSnapshotReady(
   // POST zip to local proxy; on success update the recent-snapshot index.
   const ok = await postSnapshotToProxy(snapshot, proxyPort);
   if (ok) {
+    digests[agentId] = digest;
+    await chrome.storage.session.set({ [POSTED_DIGESTS_STORAGE_KEY]: digests });
     const entry: RecentSnapshotEntry = {
       agentId,
       agentName: snapshot.agent.display_name || snapshot.agent.name,
@@ -466,16 +517,22 @@ async function handleAgentCaptured(
 
   await upsertSnapshot(agentId, (snapshot) => {
     snapshot.tenant = pickTenant(payload.data["tenant_id"], snapshot.tenant, payload.tenantHint);
-    snapshot.agent = toSnapshotAgent(payload.data, agentId);
+    snapshot.agent = mergeAgentCapture(snapshot.agent, toSnapshotAgent(payload.data, agentId), payload.data);
 
     // toolsSelected[] (populated on GET; often empty on PATCH bodies) — upsert
     // whatever binding detail is present without wiping tools we already hold.
-    for (const tool of extractToolsFromPayload(payload.data)) {
+    // Only toolsSelected: the generic extractor's single-object fallback would
+    // record the agent payload itself as a tool.
+    for (const tool of extractSelectedTools(payload.data)) {
       upsertById(snapshot.tools, tool);
     }
-    // Drop tools the agent no longer references.
-    const referenced = new Set(snapshot.agent.tools);
-    if (referenced.size > 0) {
+    // Drop tools the agent no longer references — but only when this payload
+    // actually carried a `tools` list. A payload with the key absent (agents-
+    // list entries) keeps the existing set via mergeAgentCapture; a payload
+    // with `tools: []` is a genuine detach-all and must prune (the old
+    // `size > 0` guard kept the last detached tool forever).
+    if ("tools" in payload.data) {
+      const referenced = new Set(snapshot.agent.tools);
       snapshot.tools = snapshot.tools.filter((tool) => referenced.has(tool.id));
     }
 
@@ -484,6 +541,95 @@ async function handleAgentCaptured(
 
   await flushPendingKbFiles(agentId, kbIds);
   scheduleSnapshotReady(events, agentId);
+}
+
+// ─── Pending tool source (locally-created tool uploads) ──────────────────────
+
+/**
+ * A tool-create upload (`POST /v2/builder/tools`, multipart) produces two
+ * events in unguaranteed order: TOOL_FILE_CAPTURED (the source bytes, read
+ * asynchronously from FormData) and TOOL_CAPTURED (the create response — the
+ * one tools payload whose URL has no `ids=` query). This buffer pairs them:
+ * whichever side arrives first waits for the other.
+ */
+interface PendingToolSource {
+  files: SnapshotFile[];
+  targetToolId: string | null;
+}
+
+async function readPendingToolSource(): Promise<PendingToolSource> {
+  const stored = await chrome.storage.session.get(PENDING_TOOL_SOURCE_STORAGE_KEY);
+  const value = stored[PENDING_TOOL_SOURCE_STORAGE_KEY];
+  return isRecord(value)
+    ? (value as unknown as PendingToolSource)
+    : { files: [], targetToolId: null };
+}
+
+async function writePendingToolSource(pending: PendingToolSource): Promise<void> {
+  await chrome.storage.session.set({ [PENDING_TOOL_SOURCE_STORAGE_KEY]: pending });
+}
+
+/** Split captured upload files into source (first non-requirements file) + requirements. */
+function splitToolUploadFiles(files: SnapshotFile[]): {
+  sourceFile?: SnapshotFile;
+  requirementsFile?: SnapshotFile;
+} {
+  const requirementsFile = files.find((f) => f.filename.toLowerCase() === "requirements.txt");
+  const sourceFile = files.find((f) => f.filename.toLowerCase() !== "requirements.txt");
+  return {
+    ...(sourceFile ? { sourceFile } : {}),
+    ...(requirementsFile ? { requirementsFile } : {}),
+  };
+}
+
+/** Attach captured source files to the tool with `toolId` in every snapshot holding it. */
+function attachSourceToTool(
+  snapshots: SnapshotMap,
+  toolId: string,
+  files: SnapshotFile[],
+): string[] {
+  const touched: string[] = [];
+  const split = splitToolUploadFiles(files);
+  if (!split.sourceFile && !split.requirementsFile) return touched;
+
+  for (const [agentId, snapshot] of Object.entries(snapshots)) {
+    const index = snapshot.tools.findIndex((tool) => tool.id === toolId);
+    if (index === -1) continue;
+    const next = cloneSnapshot(snapshot);
+    next.tools[index] = { ...next.tools[index]!, ...split };
+    next.capturedAt = new Date().toISOString();
+    snapshots[agentId] = next;
+    touched.push(agentId);
+  }
+  return touched;
+}
+
+async function handleToolFileCaptured(
+  events: SnapshotAssemblerEvents,
+  payload: ToolFilePayload,
+): Promise<void> {
+  const file = toSnapshotFile(payload);
+  const pending = await readPendingToolSource();
+  pending.files = dedupFiles(pending.files, [file]);
+
+  // The create response may already have arrived — attach immediately.
+  if (pending.targetToolId !== null) {
+    const snapshots = await readSnapshots();
+    const touched = attachSourceToTool(snapshots, pending.targetToolId, pending.files);
+    if (touched.length > 0) {
+      await writeSnapshots(snapshots);
+      await writePendingToolSource({ files: [], targetToolId: null });
+      for (const agentId of touched) scheduleSnapshotReady(events, agentId);
+      return;
+    }
+  }
+
+  await writePendingToolSource(pending);
+}
+
+/** True when this tools payload is a create/upload response (no `ids=` batch query). */
+function isToolCreateResponse(sourceUrl: string, toolCount: number): boolean {
+  return toolCount === 1 && !sourceUrl.includes("ids=");
 }
 
 async function handleToolCaptured(
@@ -518,6 +664,34 @@ async function handleToolCaptured(
     snapshots[agentId] = next;
     updated = true;
     scheduleSnapshotReady(events, agentId);
+  }
+
+  // Tool-create response: the tool is not referenced by any agent yet (the
+  // PATCH that lists it follows on the next save). Stash it on the active
+  // agent so its uploaded source travels into the zip once the agent
+  // references it — the prune in handleAgentCaptured drops it otherwise.
+  const createdTool = tools[0];
+  if (isToolCreateResponse(payload.sourceUrl, tools.length) && createdTool) {
+    const agentId = latestAgentId(snapshots);
+    if (agentId) {
+      const next = cloneSnapshot(snapshots[agentId]!);
+      upsertById(next.tools, createdTool);
+      const pending = await readPendingToolSource();
+      if (pending.files.length > 0) {
+        // Upload bytes arrived first — attach and clear the buffer.
+        const split = splitToolUploadFiles(pending.files);
+        const index = next.tools.findIndex((tool) => tool.id === createdTool.id);
+        next.tools[index] = { ...next.tools[index]!, ...split };
+        await writePendingToolSource({ files: [], targetToolId: null });
+      } else {
+        // Bytes still in flight — record the target for handleToolFileCaptured.
+        await writePendingToolSource({ files: [], targetToolId: createdTool.id });
+      }
+      next.capturedAt = new Date().toISOString();
+      snapshots[agentId] = next;
+      updated = true;
+      scheduleSnapshotReady(events, agentId);
+    }
   }
 
   if (updated) {
@@ -589,12 +763,18 @@ async function handleKbMetaCaptured(
   const pending = await readPendingKbFiles();
   let updated = false;
 
+  // Agents this KB points back at. When an existing KB is attached to an
+  // agent, the association lives on the KB (`agent_references`) — the agent
+  // payload may never list the KB in `knowledge_base[]`.
+  const referencedAgentIds = agentIdsFromKbMeta(payload.data);
+
   for (const [agentId, snapshot] of Object.entries(snapshots)) {
-    // Owned by this agent, or already attached (files can arrive before the
-    // agent PATCH that lists the new KB).
+    // Owned by this agent, already attached (files can arrive before the
+    // agent PATCH that lists the new KB), or referenced from the KB side.
     const owned =
       snapshot.agent.knowledge_base.includes(kbId) ||
-      snapshot.knowledgeBases.some((kb) => kb.id === kbId);
+      snapshot.knowledgeBases.some((kb) => kb.id === kbId) ||
+      referencedAgentIds.includes(agentId);
     if (!owned) continue;
 
     const next = cloneSnapshot(snapshot);
@@ -605,6 +785,14 @@ async function handleKbMetaCaptured(
       files: existing?.files ?? [],
     };
     upsertById(next.knowledgeBases, kb);
+
+    // Keep the agent's own KB list in sync so the restored agent references
+    // the KB even when no agent payload ever carried it. Only when the KB's
+    // own agent_references names this agent — a stale local KB entry after a
+    // detach must not re-attach it.
+    if (referencedAgentIds.includes(agentId) && !next.agent.knowledge_base.includes(kbId)) {
+      next.agent.knowledge_base.push(kbId);
+    }
 
     const buffer = pending[agentId];
     if (buffer && !buffer.knownKbIds.includes(kbId)) {
@@ -720,6 +908,10 @@ export function registerAssembler(events: SnapshotAssemblerEvents): void {
 
   events.on("KB_META_CAPTURED", (payload) => {
     enqueue(() => handleKbMetaCaptured(events, payload));
+  });
+
+  events.on("TOOL_FILE_CAPTURED", (payload) => {
+    enqueue(() => handleToolFileCaptured(events, payload));
   });
 
   events.on("KB_FILE_CAPTURED", (payload) => {

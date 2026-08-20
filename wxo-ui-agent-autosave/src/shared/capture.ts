@@ -120,6 +120,23 @@ export function extractToolsFromPayload(data: Record<string, unknown>): Snapshot
 }
 
 /**
+ * Extract tool objects from an AGENT payload's `toolsSelected[]` only.
+ *
+ * Agent captures must not fall through to `extractToolsFromPayload`'s
+ * single-object fallback: an agent payload has `id` + `name` too, so the
+ * fallback would record the agent itself as a tool (observed live as a stray
+ * `tools/{agent_name}/tool.json` in snapshots).
+ */
+export function extractSelectedTools(data: Record<string, unknown>): SnapshotTool[] {
+  const arr = data["toolsSelected"];
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter(isRecord)
+    .map(toSnapshotTool)
+    .filter((tool): tool is SnapshotTool => tool !== null);
+}
+
+/**
  * The agent's referenced tool ids. Agent payloads carry `tools: [uuid, …]`
  * even when `toolsSelected` is empty (PATCH request bodies).
  */
@@ -174,4 +191,20 @@ export function dedupFiles(existing: SnapshotFile[], incoming: SnapshotFile[]): 
 export function kbIdFromUploadResponse(data: Record<string, unknown>): string | null {
   const v = data["knowledge_base"];
   return typeof v === "string" && v !== "" ? v : null;
+}
+
+/**
+ * Agent uuids referenced by a KB-detail payload's `agent_references[]`.
+ *
+ * When an *existing* KB is attached to an agent, the association is recorded
+ * on the KB side (`agent_references: [{ id, display_name }]`) — the agent
+ * payload may never list the KB. This is the ownership signal for that flow.
+ */
+export function agentIdsFromKbMeta(data: Record<string, unknown>): string[] {
+  const refs = data["agent_references"];
+  if (!Array.isArray(refs)) return [];
+  return refs
+    .filter(isRecord)
+    .map((ref) => ref["id"])
+    .filter((id): id is string => typeof id === "string" && id !== "");
 }

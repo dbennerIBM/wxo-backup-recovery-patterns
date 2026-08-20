@@ -268,21 +268,19 @@ async function handlePostRestore(
     res.write(JSON.stringify(entry) + "\n");
   };
 
-  let log: RestoreLogEntry[];
   try {
-    // restoreFromZip is synchronous CLI shell-outs inside an async wrapper;
-    // we collect the full log then stream it all at once.
-    // For a true streaming experience the restore loop would need to emit
-    // incrementally — that's an enhancement, not a v1 requirement.
-    log = await restoreFromZip(zip);
+    // Each artefact's log entry is emitted as soon as its CLI call finishes,
+    // so the popup renders live per-item progress.
+    const log = await restoreFromZip(zip, emit);
+    const errors  = log.filter((e) => e.status === "error").length;
+    const skipped = log.filter((e) => e.status === "skipped").length;
+    emit({
+      artefact: "restore",
+      status: errors > 0 ? "error" : "ok",
+      message: `Done: ${log.length - errors - skipped} ok, ${skipped} skipped, ${errors} failed`,
+    });
   } catch (err) {
     emit({ artefact: "restore", status: "error", message: String(err) });
-    res.end();
-    return;
-  }
-
-  for (const entry of log) {
-    emit(entry);
   }
   res.end();
 }

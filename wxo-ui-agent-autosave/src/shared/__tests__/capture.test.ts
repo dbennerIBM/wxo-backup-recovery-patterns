@@ -12,7 +12,9 @@
 import { describe, it, expect } from "vitest";
 import {
   agentIdFromUrl,
+  agentIdsFromKbMeta,
   dedupFiles,
+  extractSelectedTools,
   extractToolIds,
   extractToolsFromPayload,
   kbIdFromUploadResponse,
@@ -207,5 +209,45 @@ describe("kbIdFromUploadResponse", () => {
   it("returns null when absent", () => {
     expect(kbIdFromUploadResponse({ id: "1213c319" })).toBeNull();
     expect(kbIdFromUploadResponse({ knowledge_base: "" })).toBeNull();
+  });
+});
+
+// ─── extractSelectedTools ─────────────────────────────────────────────────────
+
+describe("extractSelectedTools", () => {
+  it("extracts tools from toolsSelected only", () => {
+    const tools = extractSelectedTools({
+      id: AGENT_ID,
+      name: "my-agent",
+      toolsSelected: [{ id: "t1", name: "tool_one", binding: { python: {} } }],
+    });
+    expect(tools.map((t) => t.name)).toEqual(["tool_one"]);
+  });
+
+  it("does NOT fall back to the agent payload itself as a single tool", () => {
+    // PATCH bodies have id + name but empty/absent toolsSelected; the generic
+    // extractor's single-object fallback recorded the agent as a stray tool.
+    expect(extractSelectedTools({ id: AGENT_ID, name: "Untitled_Agent_1_8211Wn", tools: [] })).toEqual([]);
+    expect(extractSelectedTools({ id: AGENT_ID, name: "x", toolsSelected: [] })).toEqual([]);
+  });
+});
+
+// ─── agentIdsFromKbMeta ───────────────────────────────────────────────────────
+
+describe("agentIdsFromKbMeta", () => {
+  it("reads agent uuids from agent_references", () => {
+    expect(
+      agentIdsFromKbMeta({
+        id: "kb-1",
+        name: "bob_3530Kl",
+        agent_references: [{ display_name: "e2e-agent", id: AGENT_ID }],
+      }),
+    ).toEqual([AGENT_ID]);
+  });
+
+  it("returns [] for missing or malformed references", () => {
+    expect(agentIdsFromKbMeta({ id: "kb-1" })).toEqual([]);
+    expect(agentIdsFromKbMeta({ agent_references: "nope" })).toEqual([]);
+    expect(agentIdsFromKbMeta({ agent_references: [{ display_name: "no-id" }, null, { id: "" }] })).toEqual([]);
   });
 });

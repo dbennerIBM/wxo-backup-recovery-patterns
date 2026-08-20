@@ -78,10 +78,21 @@ export function buildZip(snapshot: AgentSnapshot): Uint8Array {
   // JSON is valid YAML; the ADK CLI accepts JSON-encoded .yaml files.
   files["agent/agent.yaml"] = [jsonBytes(snapshot.agent), opts];
 
-  // ── tools/{name}/tool.json ────────────────────────────────────────────────
+  // ── tools/{name}/tool.json (+ source.py | spec.yaml, requirements.txt) ────
   for (const tool of snapshot.tools) {
     const dir = `tools/${safeName(tool.name)}`;
-    files[`${dir}/tool.json`] = [jsonBytes(tool), opts];
+    // Captured upload bytes go in their own files (the names the restore path
+    // reads), never inside tool.json.
+    const { sourceFile, requirementsFile, ...meta } = tool;
+    files[`${dir}/tool.json`] = [jsonBytes(meta), opts];
+    if (sourceFile) {
+      const isSpec = /\.(ya?ml|json)$/i.test(sourceFile.filename);
+      files[`${dir}/${isSpec ? "spec.yaml" : "source.py"}`] =
+        [new Uint8Array(sourceFile.bytes), opts];
+    }
+    if (requirementsFile) {
+      files[`${dir}/requirements.txt`] = [new Uint8Array(requirementsFile.bytes), opts];
+    }
   }
 
   // ── knowledge_bases/{kb-id}/kb.yaml + documents/ ─────────────────────────
@@ -101,6 +112,31 @@ export function buildZip(snapshot: AgentSnapshot): Uint8Array {
   }
 
   return zipSync(files);
+}
+
+// ─── snapshotContentDigest ────────────────────────────────────────────────────
+
+/**
+ * Fixed timestamp used when digesting, so only real content changes the hash.
+ * Must lie in 1980–2099: zip entries carry DOS-format mtimes and fflate
+ * rejects dates outside that range.
+ */
+const DIGEST_EPOCH = "2000-01-01T00:00:00.000Z";
+
+/**
+ * SHA-256 digest of the snapshot's *content*, ignoring `capturedAt`.
+ *
+ * `buildZip` is deterministic (FR-3.2), but `capturedAt` is stamped into
+ * manifest.json and every file's mtime — so two content-identical snapshots
+ * still produce different bytes. Pinning `capturedAt` to a fixed epoch before
+ * zipping yields a digest that changes only when the agent, tools, knowledge
+ * bases, or connections actually change. Used by the assembler to skip
+ * re-posting unchanged snapshots (dedup — the FR-3.2 rationale).
+ */
+export async function snapshotContentDigest(snapshot: AgentSnapshot): Promise<string> {
+  const bytes = buildZip({ ...snapshot, capturedAt: DIGEST_EPOCH });
+  const hash = await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
+  return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 // ─── parseZip ─────────────────────────────────────────────────────────────────

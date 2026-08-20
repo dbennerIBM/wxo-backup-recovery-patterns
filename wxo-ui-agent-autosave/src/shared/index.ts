@@ -56,6 +56,11 @@ export interface SnapshotTool {
   name: string;
   description?: string;
   binding?: unknown;
+  /** Captured upload bytes for locally-created tools (source.py / OpenAPI spec).
+   *  Serialised as its own file in the zip, not inside tool.json. */
+  sourceFile?: SnapshotFile;
+  /** Captured requirements.txt uploaded alongside a Python tool, if any. */
+  requirementsFile?: SnapshotFile;
 }
 
 export interface SnapshotFile {
