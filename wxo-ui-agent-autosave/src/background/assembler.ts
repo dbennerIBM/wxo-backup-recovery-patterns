@@ -357,7 +357,7 @@ async function emitSnapshotReady(
   if (ok) {
     const entry: RecentSnapshotEntry = {
       agentId,
-      agentName: snapshot.agent.name,
+      agentName: snapshot.agent.display_name || snapshot.agent.name,
       tenant: snapshot.tenant,
       capturedAt: snapshot.capturedAt,
       proxyUrl: `http://localhost:${proxyPort}/snapshots`,

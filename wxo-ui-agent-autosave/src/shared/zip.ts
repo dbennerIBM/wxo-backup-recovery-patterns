@@ -70,7 +70,7 @@ export function buildZip(snapshot: AgentSnapshot): Uint8Array {
     capturedAt: snapshot.capturedAt,
     tenant: snapshot.tenant,
     agentId: snapshot.agent.id,
-    agentName: snapshot.agent.name,
+    agentName: snapshot.agent.display_name || snapshot.agent.name,
   };
   files["manifest.json"] = [jsonBytes(manifest), opts];
 

@@ -130,8 +130,16 @@ describe("buildZip — manifest.json", () => {
     expect(manifest["agentId"]).toBe("agent-001");
   });
 
-  it("manifest contains agentName", () => {
+  it("manifest agentName uses display_name when present", () => {
     const snap = makeSnapshot();
+    const parsed = parseZip(buildZip(snap));
+    const manifest = readZipJson(parsed, "manifest.json") as Record<string, unknown>;
+    expect(manifest["agentName"]).toBe("My Agent");
+  });
+
+  it("manifest agentName falls back to name when display_name is absent", () => {
+    const snap = makeSnapshot();
+    delete snap.agent.display_name;
     const parsed = parseZip(buildZip(snap));
     const manifest = readZipJson(parsed, "manifest.json") as Record<string, unknown>;
     expect(manifest["agentName"]).toBe("my-agent");
