@@ -56,6 +56,16 @@ export interface SnapshotTool {
   name: string;
   description?: string;
   binding?: unknown;
+  /** Human-readable name shown in the builder UI. */
+  display_name?: string;
+  /** Full parameter schema from the builder API (query/path/header mapping via
+   *  `in` + `aliasName` on each property). Needed to synthesise a restorable
+   *  OpenAPI spec — the new UI parses specs client-side, so the raw file is
+   *  never on the wire (§ FR-1.8 barrier). */
+  input_schema?: unknown;
+  output_schema?: unknown;
+  is_async?: boolean;
+  response_format?: string;
   /** Captured upload bytes for locally-created tools (source.py / OpenAPI spec).
    *  Serialised as its own file in the zip, not inside tool.json. */
   sourceFile?: SnapshotFile;

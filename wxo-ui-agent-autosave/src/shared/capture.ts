@@ -94,6 +94,11 @@ export function toSnapshotTool(data: Record<string, unknown>): SnapshotTool | nu
   const tool: SnapshotTool = { id: data["id"], name: data["name"] };
   if (typeof data["description"] === "string") tool.description = data["description"];
   if (data["binding"] !== undefined) tool.binding = data["binding"];
+  if (typeof data["display_name"] === "string") tool.display_name = data["display_name"];
+  if (data["input_schema"] !== undefined) tool.input_schema = data["input_schema"];
+  if (data["output_schema"] !== undefined) tool.output_schema = data["output_schema"];
+  if (typeof data["is_async"] === "boolean") tool.is_async = data["is_async"];
+  if (typeof data["response_format"] === "string") tool.response_format = data["response_format"];
   return tool;
 }
 

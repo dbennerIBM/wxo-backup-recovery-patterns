@@ -23,6 +23,7 @@
 
 import { strToU8, strFromU8, zipSync, unzipSync, type Zippable, type ZipOptions } from "fflate";
 import type { AgentSnapshot } from "./index";
+import { synthesizeOpenApiSpec } from "./openapiSynth";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -89,6 +90,14 @@ export function buildZip(snapshot: AgentSnapshot): Uint8Array {
       const isSpec = /\.(ya?ml|json)$/i.test(sourceFile.filename);
       files[`${dir}/${isSpec ? "spec.yaml" : "source.py"}`] =
         [new Uint8Array(sourceFile.bytes), opts];
+    } else {
+      // The new builder UI parses OpenAPI uploads client-side and POSTs JSON,
+      // so the raw spec never crosses the network. Rebuild an importable spec
+      // from the captured schemas + binding instead (JSON is valid YAML).
+      const synthesized = synthesizeOpenApiSpec(tool);
+      if (synthesized !== null) {
+        files[`${dir}/spec.yaml`] = [jsonBytes(synthesized), opts];
+      }
     }
     if (requirementsFile) {
       files[`${dir}/requirements.txt`] = [new Uint8Array(requirementsFile.bytes), opts];

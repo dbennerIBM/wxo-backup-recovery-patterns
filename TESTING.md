@@ -7,7 +7,8 @@ This document covers:
 4. [Test Scenario B — Proxy offline (popup fallback)](#4-test-scenario-b--proxy-offline)
 5. [Test Scenario C — Partial KB upload](#5-test-scenario-c--partial-kb-upload)
 6. [Test Scenario D — Catalog tool (sourceUnavailable)](#6-test-scenario-d--catalog-tool-sourceunavailable)
-7. [Maintenance notes — wxO API endpoint changes](#7-maintenance-notes)
+7. [Test Scenario E — OpenAPI spec synthesis](#7-test-scenario-e--openapi-spec-synthesis)
+8. [Maintenance notes — wxO API endpoint changes](#8-maintenance-notes)
 
 ---
 
@@ -29,7 +30,9 @@ npm test
 | `scrubber.test.ts` | Credential scrubber — all field patterns |
 | `multipart.test.ts` | Multipart form-data decoder |
 | `urlPatterns.test.ts` | Endpoint URL matching patterns |
+| `capture.test.ts` | Pure capture helpers — tenant/agent-id extraction, tool payload envelopes, file dedup |
 | `captureLogic.test.ts` | Content script capture logic |
+| `openapiSynth.test.ts` | Full-fidelity tool capture + OpenAPI spec synthesis (`spec.yaml` from `input_schema`/`binding`) |
 | `zip.test.ts` | `buildZip` / `parseZip` / round-trips / determinism |
 | `proxyPost.test.ts` | `postSnapshotToProxy` / `appendRecentSnapshot` / index capping |
 | `settings.test.ts` | `mergeSettings` defaults and validation |
@@ -59,7 +62,7 @@ npm test
 | Chrome or Edge | Any current release | Side-load the extension from `wxo-ui-agent-autosave/dist/` |
 | Node.js | 22 | Proxy uses `--experimental-strip-types` |
 | IBM watsonx Orchestrate ADK CLI | Latest | `pip install ibm-watsonx-orchestrate` |
-| wxO SaaS tenant | — | `us-south.watson-orchestrate.cloud.ibm.com` confirmed (Aug 2026) |
+| wxO SaaS tenant | — | Both hostname families supported: `*.watson-orchestrate.cloud.ibm.com` (confirmed `us-south`, Aug 2026) and `*.watson-orchestrate.ibm.com` (confirmed `dl`, Aug 2026) |
 | IBM COS bucket | — | Or substitute AWS S3 / GCS with a compatible `.env` |
 
 ### Step 1 — Build the extension
@@ -107,9 +110,11 @@ Expected output:
 
 In the wxO Agent Builder UI, create an agent with:
 - **Name:** `e2e-test-agent`
-- **At least one Python tool** — upload a `.py` file (hand-crafted, not from catalog)
+- **At least one hand-crafted OpenAPI tool** — Create tool → **OpenAPI**, importing a spec file (not from catalog). The current UI (Aug 2026) offers only catalog / local instance / MCP server / OpenAPI; Python file upload is ADK-CLI-only, so OpenAPI is the one in-UI path that exercises tool-source capture. A ready-made fixture spec lives at [`test_autosave_openapi.yaml`](test_autosave_openapi.yaml) (httpbin echo tool with a unique marker string).
 - **At least one knowledge base** with two source documents (e.g. two `.pdf` or `.txt` files)
 - **At least one connection** (any kind — credentials not captured)
+
+> If your tenant still exposes a Python file import in Create tool, a hand-uploaded `.py` also works and yields `source.py` in the zip instead of `spec.yaml`.
 
 ---
 
@@ -121,11 +126,11 @@ In the wxO Agent Builder UI, create an agent with:
 
 1. **Trigger a capture:** In the wxO Agent Builder, open `e2e-test-agent` and make any change (e.g. edit the instructions field, then click Save). The background service worker debounces for 3 seconds and then POSTs a zip to the proxy.
 
-2. **Confirm the proxy received it:**
+2. **Confirm the proxy received it:** In the extension's **service worker console** (`chrome://extensions` → the extension's "service worker" link), look for the info-level line:
    ```
-   [wxo-proxy] [wxo-autosave] snapshot saved e2e-test-agent 2026-...
+   [wxo-autosave] snapshot uploaded (N bytes) → <tenant>/e2e-test-agent/<timestamp>.zip
    ```
-   Or query the proxy directly:
+   (The `snapshot saved` line is debug-level — enable Verbose to see it.) Or query the proxy directly:
    ```sh
    curl -H "Origin: chrome-extension://e2e" "http://localhost:7878/snapshots?agent=e2e-test-agent&tenant=<your-tenant>"
    ```
@@ -143,7 +148,7 @@ In the wxO Agent Builder UI, create an agent with:
    manifest.json
    agent/agent.yaml
    tools/<tool-name>/tool.json
-   tools/<tool-name>/source.py
+   tools/<tool-name>/spec.yaml          # synthesized OpenAPI spec (source.py for a Python upload)
    knowledge_bases/<kb-id>/kb.yaml
    knowledge_bases/<kb-id>/documents/<filename1>
    knowledge_bases/<kb-id>/documents/<filename2>
@@ -157,7 +162,7 @@ In the wxO Agent Builder UI, create an agent with:
 
 6. **Run the preflight:** Click "Restore". Verify the preflight overlay shows:
    - Your connection listed under "Connections to re-credential"
-   - No tools listed under "Tools with unavailable source" (since we uploaded a real `.py`)
+   - No tools listed under "Tools with unavailable source" (the OpenAPI tool has a `spec.yaml` — synthesized or captured)
 
 7. **Confirm and restore:** In a **fresh wxO environment** (different tenant or cleared environment), click "Restore". Watch the progress overlay. Expected per-artefact log:
    ```
@@ -244,7 +249,35 @@ In the wxO Agent Builder UI, create an agent with:
 
 ---
 
-## 7. Maintenance Notes
+## 7. Test Scenario E — OpenAPI spec synthesis
+
+**Goal:** Verify that a tool created through the UI's OpenAPI flow — where the raw spec file never crosses the network — still gets a restorable `spec.yaml` synthesized from the captured schemas.
+
+**Background:** The current builder UI (confirmed Aug 2026, `dl.watson-orchestrate.ibm.com`) parses the uploaded OpenAPI file client-side and POSTs extracted JSON per operation, so the multipart capture path never fires. Instead, the extension retains the full tool record from `GET /v2/builder/tools?ids=…` (`input_schema`, `output_schema`, `binding`, `display_name`) and `buildZip` reconstructs an importable OpenAPI 3.0 document via `openapiSynth.ts`.
+
+### Steps
+
+1. Create a tool via **Create tool → OpenAPI**, importing [`test_autosave_openapi.yaml`](test_autosave_openapi.yaml) (or any spec with at least one required query parameter and one parameter with a default value).
+2. Attach it to `e2e-test-agent` and save. Then open the agent so the builder fires the `?ids=` tools GET (this is the capture that carries the schemas).
+3. Trigger a backup and download the zip.
+
+### Expected behaviour
+
+- `tools/<tool-name>/spec.yaml` exists and is valid OpenAPI 3.0 (JSON-encoded)
+- Query parameters carry their **wire names** (from `aliasName`), not the builder's internal keys — e.g. `name`, not `query_name`
+- `required` flags and `default` values survive (the fixture's marker default `AUTOSAVE-TEST-…` is grep-able in the spec)
+- `tool.json` contains the full record: `input_schema`, `output_schema`, `display_name`, `binding`
+- Round trip: importing the extracted `spec.yaml` back through Create tool → OpenAPI recreates the tool with both parameters intact
+
+### Pass criteria
+
+- Spec file present without any multipart upload having occurred (verify: no `TOOL_FILE_CAPTURED` in the verbose service worker console)
+- A tool with a **captured** source file (Python upload via ADK-era UI or webRequest fallback) still gets its original bytes — synthesis must never overwrite captured source
+- Python/MCP-bound tools get no `spec.yaml` (synthesis is OpenAPI-only)
+
+---
+
+## 8. Maintenance Notes
 
 ### If wxO API endpoint paths change
 
@@ -265,7 +298,9 @@ The extension intercepts responses based on URL patterns defined in two places:
 | KB detail | `GET /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}` |
 | KB create + first doc | `POST /mfe_builder/api/v1/orchestrate/knowledge-bases/documents` |
 | KB doc upload | `PUT /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}/documents` |
-| Tool file upload | `POST /mfe_builder/api/v2/builder/tools` (multipart) |
+| Tool create | `POST /mfe_builder/api/v2/builder/tools` |
+
+> **Tool create body format changed (Aug 2026).** The Aug 2026 HAR showed this endpoint receiving multipart form data with the raw source file; the current UI parses OpenAPI specs client-side and POSTs extracted JSON instead, so no file crosses the wire. The multipart interceptors (content script + `webRequest` fallback) remain in place for tenants/flows that still upload files; tools captured without source bytes get a synthesized `spec.yaml` (see Scenario E).
 
 Re-verify these paths against a fresh HAR recording before any significant version update.
 

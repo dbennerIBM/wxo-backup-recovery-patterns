@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-08-24 — OpenAPI tool source synthesis (new-UI spec uploads never hit the wire)
+
+Diagnosed from a live backup zip + `GET /v2/builder/tools?ids=…` response (`dl.watson-orchestrate.ibm.com`): the new builder UI's "Create tool → OpenAPI" flow parses the uploaded spec **client-side** and POSTs extracted JSON — the raw spec file is never transmitted, so the FR-1.8 multipart capture can never fire and the zip held only a thin `tool.json` (id/name/description/binding; no parameter schema, no `spec.yaml`). Restore was impossible for these tools.
+
+### wxo-ui-agent-autosave/src/shared/capture.ts · shared/index.ts
+- `toSnapshotTool` now retains `input_schema`, `output_schema`, `display_name`, `is_async`, `response_format` from tool payloads (the `?ids=` GET carries the complete definition; `upsertById` merges, so later thin captures don't clobber them).
+
+### wxo-ui-agent-autosave/src/shared/openapiSynth.ts (New File)
+- `synthesizeOpenApiSpec(tool)` — rebuilds an importable OpenAPI 3.0 document from `binding.openapi` + `input_schema`/`output_schema`: query/path/header parameters recovered via each property's `in` + `aliasName` (wire name), body-located properties grouped into a JSON `requestBody`, `output_schema` carried into the 200 response. Returns null for python/MCP-bound tools.
+
+### wxo-ui-agent-autosave/src/shared/zip.ts
+- `buildZip` writes a synthesized `tools/{name}/spec.yaml` (JSON-encoded, valid YAML) when a tool has an `openapi` binding but no captured source file. Captured source bytes still take precedence. The proxy restore path (FR-5.6, `orchestrate tools import`) consumes it unchanged.
+
+### Tests
+- `__tests__/openapiSynth.test.ts` (New, 9 tests) — fixture is the live Aug 2026 SaaS payload; covers full-fidelity capture, parameter/aliasName recovery, requestBody grouping, zip integration, and source-bytes precedence. 380 tests total.
+
 ## 2026-08-17 — Live-tenant capture fixes (requirements v1.4)
 
 Diagnosed from a real session on `dl.watson-orchestrate.ibm.com`: snapshots were saved only on agent GET, under a `/`-rooted key (no tenant), with no tools, no connections, and no KB documents.

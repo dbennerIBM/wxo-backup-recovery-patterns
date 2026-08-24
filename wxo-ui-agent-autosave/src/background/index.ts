@@ -138,7 +138,6 @@ function handleMessage(message: ExtensionMessage): void {
           }),
         );
       emit("CONNECTION_BATCH_CAPTURED", scrubbedBatch);
-      console.debug("[wxo-autosave] CONNECTION_BATCH_CAPTURED", `${items.length} connections`);
       break;
     }
 

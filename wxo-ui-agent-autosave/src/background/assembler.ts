@@ -414,7 +414,9 @@ async function emitSnapshotReady(
       proxyUrl: `http://localhost:${proxyPort}/snapshots`,
     };
     await appendRecentSnapshot(entry);
-    console.info("[wxo-autosave] snapshot saved", agentId, snapshot.tenant, snapshot.capturedAt);
+    // Routine bookkeeping — the info-level "snapshot uploaded" line already
+    // carries the size and storage key for this save.
+    console.debug("[wxo-autosave] snapshot saved", agentId, snapshot.tenant, snapshot.capturedAt);
   }
 }
 
