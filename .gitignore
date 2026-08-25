@@ -28,3 +28,8 @@ Thumbs.db
 
 #developer-tools-chrome
 *.har
+
+#AI
+.bob
+AGENTS.md
+

@@ -66,7 +66,6 @@ The proxy listens on `http://127.0.0.1:7878` by default.
 | `COS_ENDPOINT` | ✓ | Regional COS endpoint, e.g. `https://s3.us-south.cloud-object-storage.appdomain.cloud` |
 | `COS_ACCESS_KEY_ID` | ✓ | HMAC credential access key (from the COS service credentials page, with HMAC enabled) |
 | `COS_SECRET_ACCESS_KEY` | ✓ | HMAC credential secret key |
-| `COS_INSTANCE_CRN` | | **Deprecated / ignored.** Accepted for backward compatibility only. HMAC auth does not use the `ibm-service-instance-id` header, and injecting it after signing breaks the S3 signature. |
 | `AWS_REGION` | `us-south` | COS region code |
 
 ### AWS S3 (`s3`)

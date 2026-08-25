@@ -42,10 +42,10 @@ Local Proxy Server (Node.js)
 ├── POST /restore       Execute restore via ADK CLI (NDJSON progress)
 └── GET  /health        Liveness probe
 
-Storage Backends
+Storage Backends (single S3-compatible adapter, configurable endpoint)
 ├── IBM Cloud Object Storage (HMAC auth)
 ├── AWS S3
-└── Google Cloud Storage (S3-compatible HMAC auth)
+└── Google Cloud Storage (S3 interoperability API)
 ```
 
 ---
@@ -53,24 +53,28 @@ Storage Backends
 ## Repository Structure
 
 ```
-wxo-agent-backup-recovery-requirements.md   ← Full project requirements (v1.4)
-CHANGELOG.md                                ← Version history
-TESTING.md                                  ← E2E testing runbook
+docs/
+  wxo-agent-backup-recovery-requirements.md   ← Full project requirements (v1.4)
+CHANGELOG.md                                  ← Version history
+TESTING.md                                    ← E2E testing runbook
 
-wxo-ui-agent-autosave/                      ← Chrome/Edge extension
+wxo-ui-agent-autosave/                        ← Chrome/Edge extension
   src/
     background/     ← Service worker: event dispatch, snapshot assembler
     content/        ← MAIN-world fetch/XHR interceptor + ISOLATED-world bridge
     popup/          ← Extension popup UI (session, history, restore, settings)
-    shared/         ← Pure utilities: scrubber, multipart decoder, zip, capture helpers
+    shared/         ← Pure utilities: scrubber, multipart decoder, zip, capture
+                       helpers, OpenAPI spec synthesizer
   manifest.json
 
-wxo-autosave-proxy/                         ← Local proxy server
+wxo-autosave-proxy/                           ← Local proxy server
   src/
-    storage/        ← Pluggable storage adapters (COS / S3 / GCS)
-    server.ts       ← HTTP server with 4 endpoints + CORS enforcement
+    storage/        ← Pluggable storage adapters (single S3-compatible impl)
+    server.ts       ← HTTP server with 5 endpoints + CORS enforcement
     restore.ts      ← ADK CLI restore with NDJSON progress streaming
     preflight.ts    ← Pre-restore report generation
+    transform.ts    ← ADK import spec builders (agent / connection / KB)
+    zip.ts          ← Snapshot zip reader
   README.md         ← Proxy-specific docs, env var reference, API details
   .env.example      ← Configuration template
 ```
@@ -88,16 +92,18 @@ wxo-autosave-proxy/                         ← Local proxy server
 | Multipart decoder (KB / tool uploads) | ✅ Complete |
 | Snapshot assembler + debounce engine | ✅ Complete |
 | Zip serialiser (`fflate`) | ✅ Complete |
+| OpenAPI spec synthesizer (client-side tool uploads) | ✅ Complete |
 | Snapshot capture — KB uploads, tool additions | ✅ Verified on live tenant |
 | Popup UI (session, history, restore flow, settings) | 🟡 Functional — needs expansion |
-| Restore via ADK CLI | 🟡 Implemented — not yet verified |
-| Local proxy server — all 4 endpoints | ✅ Complete |
+| Restore via ADK CLI | 🟡 Functional - needs further testing |
+| Local proxy server — all 5 endpoints | ✅ Complete |
 | Storage adapters — IBM COS, AWS S3, GCS | ✅ Complete |
-| Unit tests — 443 total (359 extension + 84 proxy) | ✅ All passing |
+| Unit tests — 494 total (385 extension + 109 proxy) | ✅ All passing |
 | E2E test runbook (4 scenarios) | 🟡 Written — restore scenarios not yet verified |
 | Google Drive storage adapter | 🔲 Planned |
 | Azure Blob storage adapter | 🔲 Planned |
 | Chrome Web Store distribution | 🔲 Side-load only for now |
+| Workflow restore | Needs reserach |
 
 ---
 
@@ -141,19 +147,18 @@ cd ../wxo-autosave-proxy && npm test
 
 ## Security
 
-Credential safety is a hard requirement. **No API keys, passwords, tokens, or OAuth secrets are ever captured, stored, or transmitted.** Connections are captured as metadata only (name, auth scheme type, server URL). After a restore, the builder re-enters credentials through the wxO UI. See [Security Requirements](wxo-agent-backup-recovery-requirements.md#8-security-requirements) for the full specification.
+Credential safety is a hard requirement. **No API keys, passwords, tokens, or OAuth secrets are ever captured, stored, or transmitted.** Connections are captured as metadata only (name, auth scheme type, server URL). After a restore, the builder re-enters credentials through the wxO UI. See [Security Requirements](docs/wxo-agent-backup-recovery-requirements.md#8-security-requirements) for the full specification.
 
-The proxy enforces CORS — only `chrome-extension://` origins are accepted. Non-browser clients cannot reach the restore endpoint, which shells out to the ADK CLI.
+The proxy enforces CORS — only `chrome-extension://` origins are accepted. Non-browser clients cannot reach the restore endpoint, which shells out to the ADK CLI. The `GET /health` endpoint is exempt from the origin gate (liveness probes / curl).
 
 ---
 
 ## Contributing
 
-Contributions are welcome. The best place to start is the [requirements document](wxo-agent-backup-recovery-requirements.md).
+Contributions are welcome. The best place to start is the [requirements document](docs/wxo-agent-backup-recovery-requirements.md).
 
 Quick links:
-- [Full Requirements](wxo-agent-backup-recovery-requirements.md)
-- [Extension Implementation Plan](wxo-ui-agent-autosave/wxo-autosave-extension-plan.md)
+- [Full Requirements](docs/wxo-agent-backup-recovery-requirements.md)
 - [Proxy Documentation](wxo-autosave-proxy/README.md)
 - [E2E Testing Runbook](TESTING.md)
 - [Changelog](CHANGELOG.md)

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-08-24 — README updated to reflect current project state
+
+### README.md
+- Repository structure updated: `wxo-agent-backup-recovery-requirements.md` moved to `docs/`; removed reference to deleted `wxo-autosave-extension-plan.md`; added `transform.ts` and `zip.ts` to proxy file listing; noted OpenAPI spec synthesizer in shared utilities.
+- Architecture section: storage backends now described as a single S3-compatible adapter (configurable endpoint); endpoint count corrected to 5 (added `/health`).
+- Current Status table: test counts updated to 494 total (385 extension + 109 proxy); OpenAPI spec synthesizer row added; endpoint count corrected.
+- Security and Contributing sections: links updated to `docs/wxo-agent-backup-recovery-requirements.md`; broken link to deleted extension plan removed; `/health` CORS exemption noted.
+
 ## 2026-08-24 — OpenAPI tool source synthesis (new-UI spec uploads never hit the wire)
 
 Diagnosed from a live backup zip + `GET /v2/builder/tools?ids=…` response (`dl.watson-orchestrate.ibm.com`): the new builder UI's "Create tool → OpenAPI" flow parses the uploaded spec **client-side** and POSTs extracted JSON — the raw spec file is never transmitted, so the FR-1.8 multipart capture can never fire and the zip held only a thin `tool.json` (id/name/description/binding; no parameter schema, no `spec.yaml`). Restore was impossible for these tools.
