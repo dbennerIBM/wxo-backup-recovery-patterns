@@ -103,7 +103,7 @@ wxo-autosave-proxy/                           ← Local proxy server
 | Google Drive storage adapter | 🔲 Planned |
 | Azure Blob storage adapter | 🔲 Planned |
 | Chrome Web Store distribution | 🔲 Side-load only for now |
-| Workflow restore | Needs reserach |
+
 
 ---
 
