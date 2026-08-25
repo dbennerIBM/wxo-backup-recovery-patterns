@@ -16,6 +16,7 @@ import {
   dedupFiles,
   extractSelectedTools,
   extractToolIds,
+  toolIdsForPrune,
   extractToolsFromPayload,
   kbIdFromUploadResponse,
   pickTenant,
@@ -173,6 +174,30 @@ describe("extractToolIds", () => {
   it("ignores non-string entries and missing field", () => {
     expect(extractToolIds({ tools: ["a", 1, null, "b"] })).toEqual(["a", "b"]);
     expect(extractToolIds({})).toEqual([]);
+  });
+  it("extracts ids from object-shaped tools[] entries (current-UI agent payloads)", () => {
+    expect(
+      extractToolIds({ tools: [{ id: "t1", name: "one" }, { id: "t2" }, { name: "no-id" }] }),
+    ).toEqual(["t1", "t2"]);
+    expect(extractToolIds({ tools: ["s1", { id: "o1" }] })).toEqual(["s1", "o1"]);
+  });
+});
+
+describe("toolIdsForPrune — the snapshot-oscillation guard", () => {
+  it("returns null when tools is absent (agents-list entry) — keep held tools", () => {
+    expect(toolIdsForPrune({ id: "a1", name: "agent" })).toBeNull();
+  });
+  it("returns an empty set for tools: [] — a genuine detach-all prunes", () => {
+    const set = toolIdsForPrune({ tools: [] });
+    expect(set).not.toBeNull();
+    expect(set!.size).toBe(0);
+  });
+  it("returns the id set for string and object shapes", () => {
+    expect([...toolIdsForPrune({ tools: ["t1", "t2"] })!]).toEqual(["t1", "t2"]);
+    expect([...toolIdsForPrune({ tools: [{ id: "t3", binding: {} }] })!]).toEqual(["t3"]);
+  });
+  it("⚠️  returns null for a non-empty tools[] with no extractable ids — pruning on an unrecognised shape wiped every tool and flip-flopped the snapshot digest (684 ↔ 2268 byte upload oscillation, Aug 2026)", () => {
+    expect(toolIdsForPrune({ tools: [42, { name: "shapeless" }] })).toBeNull();
   });
 });
 

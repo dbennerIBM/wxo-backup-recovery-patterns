@@ -148,7 +148,33 @@ export function extractSelectedTools(data: Record<string, unknown>): SnapshotToo
 export function extractToolIds(data: Record<string, unknown>): string[] {
   const arr = data["tools"];
   if (!Array.isArray(arr)) return [];
-  return arr.filter((v): v is string => typeof v === "string");
+  const ids: string[] = [];
+  for (const v of arr) {
+    // Two shapes seen live: bare uuid strings, and tool objects with an `id`.
+    if (typeof v === "string") ids.push(v);
+    else if (isRecord(v) && typeof v["id"] === "string") ids.push(v["id"]);
+  }
+  return ids;
+}
+
+/**
+ * Prune decision for an agent payload's `tools[]`.
+ *
+ * Returns the set of referenced tool ids when the payload is authoritative and
+ * held tools should be pruned to it, or null when it must NOT prune:
+ *  - `tools` absent (agents-list entries) → null: keep the existing set.
+ *  - `tools: []` → empty set: a genuine detach-all.
+ *  - `tools` non-empty but yielding zero extractable ids → null: an
+ *    unrecognised shape. Pruning on it would wipe every tool and flip-flop the
+ *    snapshot digest against the next tools GET, re-uploading a "changed"
+ *    snapshot on every oscillation.
+ */
+export function toolIdsForPrune(data: Record<string, unknown>): Set<string> | null {
+  const arr = data["tools"];
+  if (!Array.isArray(arr)) return null;
+  const ids = extractToolIds(data);
+  if (ids.length === 0 && arr.length > 0) return null;
+  return new Set(ids);
 }
 
 /** First `tenant_id` found on any tool object in a tools payload, else null. */

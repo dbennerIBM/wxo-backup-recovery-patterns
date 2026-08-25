@@ -36,6 +36,7 @@ import {
   dedupFiles,
   extractSelectedTools,
   extractToolIds,
+  toolIdsForPrune,
   extractToolsFromPayload,
   pickTenant,
   tenantFromToolsPayload,
@@ -529,13 +530,16 @@ async function handleAgentCaptured(
       upsertById(snapshot.tools, tool);
     }
     // Drop tools the agent no longer references — but only when this payload
-    // actually carried a `tools` list. A payload with the key absent (agents-
-    // list entries) keeps the existing set via mergeAgentCapture; a payload
-    // with `tools: []` is a genuine detach-all and must prune (the old
-    // `size > 0` guard kept the last detached tool forever).
-    if ("tools" in payload.data) {
-      const referenced = new Set(snapshot.agent.tools);
+    // carried an authoritative `tools` list (see toolIdsForPrune for the
+    // decision table; an unrecognised shape must not wipe held tools).
+    const referenced = toolIdsForPrune(payload.data);
+    if (referenced !== null) {
       snapshot.tools = snapshot.tools.filter((tool) => referenced.has(tool.id));
+    } else if ("tools" in payload.data) {
+      console.debug(
+        "[wxo-autosave] agent payload tools[] had no extractable ids — prune skipped",
+        payload.sourceUrl,
+      );
     }
 
     return snapshot;
