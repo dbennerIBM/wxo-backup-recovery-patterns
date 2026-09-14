@@ -90,6 +90,14 @@ type SnapshotReadyListener = (agentId: string, snapshot: AgentSnapshot) => void;
 const debounceTimers = new Map<string, number>();
 const snapshotReadyListeners: SnapshotReadyListener[] = [];
 
+/**
+ * Cached debounce delay used by scheduleSnapshotReady(). Initialised to the
+ * compile-time default and refreshed from chrome.storage.sync whenever the
+ * user saves settings via the popup — kept synchronous so setTimeout can be
+ * called without awaiting storage on every event.
+ */
+let cachedDebounceMs: number = DEBOUNCE_DEFAULT_MS;
+
 /** Proxy hosts to try in order — localhost first, then 127.0.0.1 as fallback. */
 const PROXY_HOSTS = ["localhost", "127.0.0.1"] as const;
 
@@ -438,7 +446,7 @@ function scheduleSnapshotReady(
       if (!snapshot) return;
       await emitSnapshotReady(events, agentId, snapshot);
     })();
-  }, DEBOUNCE_DEFAULT_MS);
+  }, cachedDebounceMs);
 
   debounceTimers.set(agentId, nextTimer);
 }
@@ -896,6 +904,17 @@ function enqueue(task: () => Promise<void>): void {
 }
 
 export function registerAssembler(events: SnapshotAssemblerEvents): void {
+  // Seed cachedDebounceMs from persisted settings, then keep it in sync with
+  // any changes the user makes via the popup settings panel.
+  void chrome.storage.sync.get(SETTINGS_STORAGE_KEY).then((stored) => {
+    cachedDebounceMs = mergeSettings(stored[SETTINGS_STORAGE_KEY]).debounceMs;
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "sync" || !(SETTINGS_STORAGE_KEY in changes)) return;
+    cachedDebounceMs = mergeSettings(changes[SETTINGS_STORAGE_KEY].newValue).debounceMs;
+    console.debug("[wxo-autosave] debounceMs updated to", cachedDebounceMs, "ms");
+  });
+
   events.on("AGENT_CAPTURED", (payload) => {
     enqueue(() => handleAgentCaptured(events, payload));
   });

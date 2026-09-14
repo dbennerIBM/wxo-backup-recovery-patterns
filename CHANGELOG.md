@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-14 — Fix debounce setting not taking effect
+
+### wxo-ui-agent-autosave/src/background/assembler.ts
+- Added module-level `cachedDebounceMs` variable, initialized to `DEBOUNCE_DEFAULT_MS`.
+- `registerAssembler()` now seeds `cachedDebounceMs` from `chrome.storage.sync` on startup and registers a `chrome.storage.onChanged` listener to keep it current whenever the user saves settings in the popup.
+- `scheduleSnapshotReady()` now uses `cachedDebounceMs` instead of the hardcoded `DEBOUNCE_DEFAULT_MS` constant, so the popup's debounce field actually controls the timer window.
+
 ## 2026-08-24 — README updated to reflect current project state
 
 ### README.md
