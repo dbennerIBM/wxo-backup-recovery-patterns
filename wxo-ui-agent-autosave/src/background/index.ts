@@ -93,6 +93,9 @@ function handleMessage(message: ExtensionMessage): void {
         ...(typeof message.payload.tenantHint === "string" && message.payload.tenantHint !== ""
           ? { tenantHint: message.payload.tenantHint }
           : {}),
+        ...(typeof message.payload.hostname === "string" && message.payload.hostname !== ""
+          ? { hostname: message.payload.hostname }
+          : {}),
       });
       console.debug("[wxo-autosave] AGENT_CAPTURED", message.payload.sourceUrl);
       break;

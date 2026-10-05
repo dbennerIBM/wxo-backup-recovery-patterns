@@ -110,8 +110,12 @@ async function fetchProxySnapshots(
   port: number,
   agentName: string,
   tenant: string,
+  hostname?: string,
 ): Promise<ProxySnapshotRow[] | null> {
-  const path = `/snapshots?agent=${encodeURIComponent(agentName)}&tenant=${encodeURIComponent(tenant)}`;
+  // Use hostname as the top-level scope when available (new format); fall back
+  // to tenant UUID for older snapshots that predate the hostname field.
+  const scope = hostname ?? tenant;
+  const path = `/snapshots?agent=${encodeURIComponent(agentName)}&tenant=${encodeURIComponent(scope)}`;
   try {
     const res = await tryFetch(port, path, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return null;
@@ -454,6 +458,7 @@ async function init(): Promise<void> {
       settings.proxyPort,
       latestLocal.agentName,
       latestLocal.tenant,
+      latestLocal.hostname,
     );
     if (proxyRows !== null) {
       proxyOnline  = true;

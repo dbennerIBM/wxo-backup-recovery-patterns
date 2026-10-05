@@ -23,6 +23,12 @@ export interface AgentPayload {
    * no `tenant_id` (true on some tenants). Never a credential.
    */
   tenantHint?: string;
+  /**
+   * The WXO page hostname (e.g. "dl.watson-orchestrate.ibm.com"). Stored on
+   * the snapshot so the proxy can use it as a human-readable top-level storage
+   * path instead of the opaque tenant UUID cookie value.
+   */
+  hostname?: string;
 }
 
 /** Raw JSON body of a GET /tools, GET /tools/{id}, or POST /tools response. */

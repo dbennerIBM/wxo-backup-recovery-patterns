@@ -89,6 +89,10 @@ export interface AgentSnapshot {
   schemaVersion: string;
   capturedAt: string;
   tenant: string;
+  /** WXO page hostname (e.g. "dl.watson-orchestrate.ibm.com"). Used as the
+   *  human-readable top-level storage path in COS instead of the opaque tenant
+   *  UUID. Optional for backward compat with older snapshots that lack it. */
+  hostname?: string;
   agent: SnapshotAgent;
   tools: SnapshotTool[];
   knowledgeBases: SnapshotKnowledgeBase[];
@@ -118,6 +122,9 @@ export interface RecentSnapshotEntry {
   agentId: string;
   agentName: string;
   tenant: string;
+  /** WXO page hostname — the human-readable top-level COS scope used when
+   *  listing snapshots. Optional for backward compat with older entries. */
+  hostname?: string;
   capturedAt: string;
   proxyUrl: string;
 }

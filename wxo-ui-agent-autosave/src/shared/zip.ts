@@ -66,13 +66,14 @@ export function buildZip(snapshot: AgentSnapshot): Uint8Array {
   const files: Zippable = {};
 
   // ── manifest.json ──────────────────────────────────────────────────────────
-  const manifest = {
+  const manifest: Record<string, string> = {
     schemaVersion: snapshot.schemaVersion,
     capturedAt: snapshot.capturedAt,
     tenant: snapshot.tenant,
     agentId: snapshot.agent.id,
     agentName: snapshot.agent.display_name || snapshot.agent.name,
   };
+  if (snapshot.hostname) manifest["hostname"] = snapshot.hostname;
   files["manifest.json"] = [jsonBytes(manifest), opts];
 
   // ── agent/agent.yaml ───────────────────────────────────────────────────────

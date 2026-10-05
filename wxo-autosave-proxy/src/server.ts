@@ -144,9 +144,20 @@ async function handlePostSnapshot(
   // FR-4.1: storage path = {tenant}/{agent-name}/{ISO-timestamp}.zip
   // Never let the key start with "/" or contain an empty segment — some agent
   // payloads carry no tenant_id, and the extension may not have a hint yet.
-  const tenant = pathSegment(manifest.tenant, "unknown-tenant");
+  // Top-level scope: prefer the human-readable hostname (e.g. "dl.watson-orchestrate.ibm.com")
+  // over the opaque tenant UUID. Fall back to tenant for zips captured before hostname was added.
+  const scope = pathSegment(manifest.hostname ?? manifest.tenant, "unknown-tenant");
   const agentName = pathSegment(manifest.agentName, manifest.agentId || "unknown-agent");
-  const storageKey = `${tenant}/${agentName}/${manifest.capturedAt}.zip`;
+  // Convert ISO timestamp to filename-safe parts.
+  // 2024-01-15T10:30:45.123Z → date "2024-01-15", time "10-30-45"
+  const isoSafe = manifest.capturedAt
+    .replace(/:/g, "-")
+    .replace(/\.\d+Z$/, "");
+  const [date = "unknown-date", time = "unknown-time"] = isoSafe.split("T");
+  // FR-4.1: storage path = {hostname}/{agent-name}/{date}/{agent-name}_{time}.zip
+  // Top-level hostname folder is human-readable; date subfolder keeps daily snapshots
+  // grouped so COS browsing stays manageable even when an agent is edited heavily.
+  const storageKey = `${scope}/${agentName}/${date}/${agentName}_${time}.zip`;
 
   let id: string;
   try {

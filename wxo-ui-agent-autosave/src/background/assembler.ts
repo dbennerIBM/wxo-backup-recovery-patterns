@@ -75,6 +75,7 @@ const SNAPSHOT_STORAGE_KEY = "agentSnapshots";
 const PENDING_KB_FILES_STORAGE_KEY = "pendingKbFiles";
 const POSTED_DIGESTS_STORAGE_KEY = "postedSnapshotDigests";
 const PENDING_TOOL_SOURCE_STORAGE_KEY = "pendingToolSource";
+const ACTIVE_AGENT_STORAGE_KEY = "activeAgentId";
 
 type SnapshotMap = Record<string, AgentSnapshot>;
 
@@ -419,6 +420,7 @@ async function emitSnapshotReady(
       agentId,
       agentName: snapshot.agent.display_name || snapshot.agent.name,
       tenant: snapshot.tenant,
+      ...(snapshot.hostname ? { hostname: snapshot.hostname } : {}),
       capturedAt: snapshot.capturedAt,
       proxyUrl: `http://localhost:${proxyPort}/snapshots`,
     };
@@ -497,17 +499,42 @@ function latestAgentId(snapshots: SnapshotMap): string | null {
   return best;
 }
 
-async function flushPendingKbFiles(agentId: string, kbIds: string[]): Promise<void> {
+async function readActiveAgentId(): Promise<string | null> {
+  const stored = await chrome.storage.session.get(ACTIVE_AGENT_STORAGE_KEY);
+  const value = stored[ACTIVE_AGENT_STORAGE_KEY];
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+async function writeActiveAgentId(agentId: string): Promise<void> {
+  await chrome.storage.session.set({ [ACTIVE_AGENT_STORAGE_KEY]: agentId });
+}
+
+/**
+ * Returns the agent the user is actively editing, falling back to the
+ * timestamp-based heuristic if no explicit record exists (e.g. after a
+ * service-worker restart before any AGENT_CAPTURED event fires).
+ */
+async function activeOrLatestAgentId(snapshots: SnapshotMap): Promise<string | null> {
+  const active = await readActiveAgentId();
+  if (active !== null && active in snapshots) return active;
+  return latestAgentId(snapshots);
+}
+
+async function flushPendingKbFiles(agentId: string): Promise<void> {
   const pending = await readPendingKbFiles();
   const buffer = pending[agentId];
   if (!buffer || buffer.files.length === 0) return;
 
-  const targetKbId = findNewKnowledgeBaseId(buffer.knownKbIds, kbIds);
-  if (!targetKbId) return;
-
+  // Read kbIds from the already-merged snapshot so partial PATCH payloads
+  // (which omit knowledge_base) don't cause findNewKnowledgeBaseId to return
+  // null and silently abandon the buffered files.
   const snapshots = await readSnapshots();
   const snapshot = snapshots[agentId];
   if (!snapshot) return;
+
+  const kbIds = snapshot.agent.knowledge_base;
+  const targetKbId = findNewKnowledgeBaseId(buffer.knownKbIds, kbIds);
+  if (!targetKbId) return;
 
   attachFilesToKnowledgeBase(snapshot, targetKbId, buffer.files);
   snapshot.capturedAt = new Date().toISOString();
@@ -524,10 +551,11 @@ async function handleAgentCaptured(
   const agentId = extractAgentId(payload.data, payload.sourceUrl);
   if (!agentId) return;
 
-  const kbIds = extractKnowledgeBaseIds(payload.data);
+  await writeActiveAgentId(agentId);
 
   await upsertSnapshot(agentId, (snapshot) => {
     snapshot.tenant = pickTenant(payload.data["tenant_id"], snapshot.tenant, payload.tenantHint);
+    if (payload.hostname && !snapshot.hostname) snapshot.hostname = payload.hostname;
     snapshot.agent = mergeAgentCapture(snapshot.agent, toSnapshotAgent(payload.data, agentId), payload.data);
 
     // toolsSelected[] (populated on GET; often empty on PATCH bodies) — upsert
@@ -553,7 +581,7 @@ async function handleAgentCaptured(
     return snapshot;
   });
 
-  await flushPendingKbFiles(agentId, kbIds);
+  await flushPendingKbFiles(agentId);
   scheduleSnapshotReady(events, agentId);
 }
 
@@ -686,7 +714,7 @@ async function handleToolCaptured(
   // references it — the prune in handleAgentCaptured drops it otherwise.
   const createdTool = tools[0];
   if (isToolCreateResponse(payload.sourceUrl, tools.length) && createdTool) {
-    const agentId = latestAgentId(snapshots);
+    const agentId = await activeOrLatestAgentId(snapshots);
     if (agentId) {
       const next = cloneSnapshot(snapshots[agentId]!);
       upsertById(next.tools, createdTool);
@@ -811,7 +839,11 @@ async function handleKbMetaCaptured(
     const buffer = pending[agentId];
     if (buffer && !buffer.knownKbIds.includes(kbId)) {
       attachFilesToKnowledgeBase(next, kbId, buffer.files);
-      delete pending[agentId];
+      // Add this kbId to knownKbIds so subsequent KB-meta events (for other
+      // new KBs created in the same session) don't re-flush the same files.
+      // Do not delete the buffer — further new-KB metas can still claim it
+      // until flushPendingKbFiles (triggered by the agent PATCH) clears it.
+      pending[agentId] = { knownKbIds: [...buffer.knownKbIds, kbId], files: buffer.files };
     }
 
     next.capturedAt = new Date().toISOString();
@@ -833,7 +865,7 @@ async function handleKbFileCaptured(
 
   if (payload.kbId === "") {
     const snapshots = await readSnapshots();
-    const agentId = latestAgentId(snapshots);
+    const agentId = await activeOrLatestAgentId(snapshots);
     if (!agentId) return;
 
     const pending = await readPendingKbFiles();
@@ -872,7 +904,7 @@ async function handleKbFileCaptured(
   // later AGENT_CAPTURED / KB_META_CAPTURED will confirm ownership and add meta.
   // Files cannot be re-fetched, so this is not deferred (single-agent session, § 9).
   if (!updated) {
-    const agentId = latestAgentId(snapshots);
+    const agentId = await activeOrLatestAgentId(snapshots);
     if (!agentId) return;
     const next = cloneSnapshot(snapshots[agentId]!);
     attachFilesToKnowledgeBase(next, payload.kbId, [file]);

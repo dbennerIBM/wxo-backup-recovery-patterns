@@ -386,7 +386,7 @@ function emitCapturedResponse(type: string, data: Record<string, unknown>, url: 
     const scrubbed = quickScrub(data);
     sendToBridge({
       type: "AGENT_CAPTURED",
-      payload: { data: scrubbed, sourceUrl: url, tenantHint: readTenantHint() },
+      payload: { data: scrubbed, sourceUrl: url, tenantHint: readTenantHint(), hostname: location.hostname },
     });
   } else if (type === "TOOL_CAPTURED") {
     const scrubbed = quickScrub(data);

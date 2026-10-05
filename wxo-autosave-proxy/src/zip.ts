@@ -18,6 +18,9 @@ export interface ZipManifest {
   tenant: string;
   agentId: string;
   agentName: string;
+  /** WXO page hostname (e.g. "dl.watson-orchestrate.ibm.com"). Present on zips
+   *  captured after this field was added; absent on older snapshots. */
+  hostname?: string;
 }
 
 export interface ZipToolMeta {
