@@ -77,7 +77,7 @@ export function validateAdkCli(): void {
 
   // 2. Check that an environment is activated (exit 0 = env is active).
   try {
-    execSync("orchestrate env get", { stdio: "pipe" });
+    execSync("orchestrate env list", { stdio: "pipe" });
   } catch {
     throw new Error(
       [

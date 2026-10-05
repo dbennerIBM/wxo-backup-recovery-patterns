@@ -51,6 +51,12 @@ function internalError(res: ServerResponse, message: string): void {
   json(res, 500, { error: message });
 }
 
+/** A safe single storage-path segment: trimmed, no slashes; fallback if empty. */
+export function pathSegment(value: unknown, fallback: string): string {
+  const v = typeof value === "string" ? value.trim().replace(/[\\/]+/g, "_") : "";
+  return v === "" ? fallback : v;
+}
+
 function parsedUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? "/", "http://localhost");
 }
@@ -69,14 +75,23 @@ function handleCors(
 ): boolean {
   const origin = req.headers["origin"] ?? "";
 
+
   // Allow any chrome-extension:// origin when the configured value is the
   // bare scheme (default), or require an exact match when a full ID is set.
+  //
+  // Chrome extension popups may not send an Origin header on GET requests,
+  // so allow empty-origin GETs for read-only endpoints (SEC-4 still blocks
+  // empty-origin POSTs which mutate state).
+  const isReadOnly = req.method === "GET" || req.method === "OPTIONS";
   const originOk =
-    allowedOrigin === "chrome-extension://"
-      ? origin.startsWith("chrome-extension://")
-      : origin === allowedOrigin;
+    (origin === "" && isReadOnly)
+      ? true
+      : allowedOrigin === "chrome-extension://"
+        ? origin.startsWith("chrome-extension://")
+        : origin === allowedOrigin;
 
   if (!originOk) {
+    console.log(`[wxo-proxy] CORS REJECTED — origin: "${origin}"`);
     // Still handle OPTIONS so browsers don't see a connection error, but
     // omit CORS headers so the browser blocks the request.
     if (req.method === "OPTIONS") {
@@ -127,7 +142,22 @@ async function handlePostSnapshot(
 
   const { manifest } = zip;
   // FR-4.1: storage path = {tenant}/{agent-name}/{ISO-timestamp}.zip
-  const storageKey = `${manifest.tenant}/${manifest.agentName}/${manifest.capturedAt}.zip`;
+  // Never let the key start with "/" or contain an empty segment — some agent
+  // payloads carry no tenant_id, and the extension may not have a hint yet.
+  // Top-level scope: prefer the human-readable hostname (e.g. "dl.watson-orchestrate.ibm.com")
+  // over the opaque tenant UUID. Fall back to tenant for zips captured before hostname was added.
+  const scope = pathSegment(manifest.hostname ?? manifest.tenant, "unknown-tenant");
+  const agentName = pathSegment(manifest.agentName, manifest.agentId || "unknown-agent");
+  // Convert ISO timestamp to filename-safe parts.
+  // 2024-01-15T10:30:45.123Z → date "2024-01-15", time "10-30-45"
+  const isoSafe = manifest.capturedAt
+    .replace(/:/g, "-")
+    .replace(/\.\d+Z$/, "");
+  const [date = "unknown-date", time = "unknown-time"] = isoSafe.split("T");
+  // FR-4.1: storage path = {hostname}/{agent-name}/{date}/{agent-name}_{time}.zip
+  // Top-level hostname folder is human-readable; date subfolder keeps daily snapshots
+  // grouped so COS browsing stays manageable even when an agent is edited heavily.
+  const storageKey = `${scope}/${agentName}/${date}/${agentName}_${time}.zip`;
 
   let id: string;
   try {
@@ -150,7 +180,8 @@ async function handleGetSnapshots(
   const tenant = url.searchParams.get("tenant")?.trim() ?? "";
 
   if (!agent || !tenant) {
-    return badRequest(res, "Query params agent and tenant are required");
+    // Return empty list instead of error when params are missing.
+    return json(res, 200, []);
   }
 
   const prefix = `${tenant}/${agent}/`;
@@ -248,21 +279,19 @@ async function handlePostRestore(
     res.write(JSON.stringify(entry) + "\n");
   };
 
-  let log: RestoreLogEntry[];
   try {
-    // restoreFromZip is synchronous CLI shell-outs inside an async wrapper;
-    // we collect the full log then stream it all at once.
-    // For a true streaming experience the restore loop would need to emit
-    // incrementally — that's an enhancement, not a v1 requirement.
-    log = await restoreFromZip(zip);
+    // Each artefact's log entry is emitted as soon as its CLI call finishes,
+    // so the popup renders live per-item progress.
+    const log = await restoreFromZip(zip, emit);
+    const errors  = log.filter((e) => e.status === "error").length;
+    const skipped = log.filter((e) => e.status === "skipped").length;
+    emit({
+      artefact: "restore",
+      status: errors > 0 ? "error" : "ok",
+      message: `Done: ${log.length - errors - skipped} ok, ${skipped} skipped, ${errors} failed`,
+    });
   } catch (err) {
     emit({ artefact: "restore", status: "error", message: String(err) });
-    res.end();
-    return;
-  }
-
-  for (const entry of log) {
-    emit(entry);
   }
   res.end();
 }
@@ -274,15 +303,26 @@ export function createProxyServer(
   adapter: StorageAdapter,
 ): ReturnType<typeof createServer> {
   const server = createServer((req, res) => {
-    if (!handleCors(req, res, config.allowedOrigin)) return;
-
     const url    = parsedUrl(req);
     const method = req.method ?? "GET";
     const path   = url.pathname;
 
+    // GET /health is a liveness probe that reveals nothing and mutates nothing,
+    // so it is served to origin-less clients (curl, health checkers) without
+    // the CORS gate. Browser callers still pass through handleCors below so
+    // they receive Access-Control-Allow-Origin.
+    if (method === "GET" && path === "/health" && !req.headers["origin"]) {
+      json(res, 200, { status: "ok" });
+      return;
+    }
+
+    if (!handleCors(req, res, config.allowedOrigin)) return;
+
     void (async () => {
       try {
-        if (method === "POST" && path === "/snapshots") {
+        if (method === "GET" && path === "/health") {
+          json(res, 200, { status: "ok" });
+        } else if (method === "POST" && path === "/snapshots") {
           await handlePostSnapshot(req, res, adapter, config.provider);
         } else if (method === "GET" && path === "/snapshots") {
           await handleGetSnapshots(req, res, adapter);

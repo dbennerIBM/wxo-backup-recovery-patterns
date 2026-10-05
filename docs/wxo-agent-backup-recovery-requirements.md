@@ -1,6 +1,6 @@
 # wxO Agent Builder — Backup & Recovery: Project Requirements
 
-> **Status:** v1.2 — updated to reflect completed v1 implementation (Aug 2026)
+> **Status:** v1.4 — live-tenant capture fixes: PATCH request-body capture, tenant from session cookie, tools envelope, FormData upload capture (Aug 2026)
 > **Maintainer:** @dbenner
 > **Repo:** [wxO Backup Recovery Patterns](https://github.com/dbenner/wxo-backup-recovery-patterns)
 > **Contributions welcome:** Please open an Issue or PR. See [Contributing](#contributing) for guidance.
@@ -13,6 +13,8 @@
 |---|---|---|
 | v1.0 | Aug 2026 | Initial draft — endpoints derived from ADK documentation and plan assumptions |
 | v1.1 | Aug 2026 | **API corrections from 4 live HAR recordings.** All endpoint paths updated to confirmed values. Auth model corrected. KB paths fully revised. Proactive fetch requirement revised. See [§ Deviations from v1.0](#deviations-from-v10-confirmed-by-har-analysis) for a full summary of changes. |
+| v1.4 | Aug 2026 | **Live-tenant capture fixes** (from a real session on `dl.watson-orchestrate.ibm.com`). (1) `PATCH /agents/{uuid}` returns **204 No Content** — the saved state is the **request body**, which is now captured (agent uuid from the URL). (2) Agent payloads on this tenant carry **no `tenant_id`** — tenant now comes from the `x-ibm-wo-tenant-id` session cookie (fallback: hostname; proxy never writes a `/`-rooted key). (3) `GET /v2/builder/tools?ids=` returns a **paginated `{ data: [...] }` envelope**, not a bare array — now parsed; tools referenced by `agent.tools[]` are accepted even when `toolsSelected` is empty. (4) KB/tool **upload bodies are captured from XHR `FormData`** in the content script (with filename+length de-dup); the KB uuid is taken from the create response. (5) The KB-create endpoint no longer collides with the KB-detail regex. (6) Assembler handlers are serialised (fixes lost updates with 200+ connection records) and `CONNECTION_BATCH_CAPTURED` is applied atomically. Corrects FR-1.2, FR-1.3, FR-1.6, FR-1.17; see § 12.15–12.18. |
+| v1.3 | Aug 2026 | **Post-E2E hardening.** Live testing showed nothing was being captured: the content script ran in the ISOLATED world (whose `window.fetch` is separate from the page's) and the wxO UI issues API calls via axios/XHR, not `fetch`. Content script now runs in the **MAIN world** with a fetch **and** XHR interceptor and relays via `postMessage` to an ISOLATED-world `bridge.ts`. Added `*.watson-orchestrate.ibm.com` (AWS-hosted / regulated-region SaaS) alongside `*.watson-orchestrate.cloud.ibm.com`. Proxy: `tsx` loader replaces `--experimental-strip-types` (which never resolved the `.js` import specifiers); COS CRN middleware removed (broke HMAC signature); `GET /health` added; `127.0.0.1` fallback in extension. SEC-4 reaffirmed — empty-Origin requests are rejected except `GET /health`. See [§ 12.9–12.14](#129-main-world-content-script-and-postmessage-bridge). |
 | v1.2 | Aug 2026 | **Implementation complete.** All 7 sub-tasks shipped. Proxy technology resolved to Node.js TypeScript. COS/S3/GCS adapters shipped; Google Drive and Azure Blob deferred to follow-up. `SNAPSHOT_READY` bus wiring complete. FR-4.5 corrected: IBM COS uses HMAC credentials (`COS_ACCESS_KEY_ID` / `COS_SECRET_ACCESS_KEY`), not `COS_API_KEY`. OD-1, OD-2, OD-3 closed. Contributing section updated to reflect current repo layout. See [§ Implementation Record](#12-implementation-record) for a full summary. |
 
 ---
@@ -114,10 +116,12 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 ┌──────────────────────────────────────────────────────────────┐
 │  Chrome / Edge Browser                                       │
 │                                                              │
-│  ┌─────────────────────┐    chrome.runtime.sendMessage       │
-│  │  Content Script     │──────────────────────────────────┐  │
-│  │  (fetch interceptor)│                                  │  │
-│  └─────────────────────┘                                  ▼  │
+│  ┌──────────────────┐ postMessage ┌────────────┐ sendMessage │
+│  │ Content Script   │────────────▶│ bridge.ts  │──────────┐  │
+│  │ (MAIN world:     │  channel    │ (ISOLATED  │          │  │
+│  │  fetch + XHR     │ __wxo_auto- │  world     │          │  │
+│  │  interceptor)    │  save__     │  relay)    │          │  │
+│  └──────────────────┘             └────────────┘          ▼  │
 │                                         ┌──────────────────┐ │
 │  ┌─────────────────────┐  webRequest    │  Background SW   │ │
 │  │  wxO Agent Builder  │──(POST/PUT)───▶│  (MV3 service    │ │
@@ -150,10 +154,10 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 **Data flow summary:**
 
 1. Builder uses the wxO Agent Builder UI normally.
-2. The content script's `fetch` interceptor captures every JSON response from wxO API endpoints of interest, as well as multipart request bodies for KB document uploads.
-3. The `chrome.webRequest.onBeforeRequest` listener in the background service worker provides a complementary capture path for multipart POST and PUT bodies.
+2. The content script — injected into the page's **MAIN world** — overrides `window.fetch` and patches `XMLHttpRequest.prototype` (`open` / `setRequestHeader` / `send`) so both fetch- and axios/XHR-based wxO API traffic is observed. It captures JSON response bodies from endpoints of interest, plus multipart request bodies for uploads sent via `fetch`. Because the MAIN world has no `chrome.*` APIs, captured events are `window.postMessage`d on the `__wxo_autosave__` channel to a companion ISOLATED-world content script (`bridge.ts`), which validates the message type against an allowlist and relays it via `chrome.runtime.sendMessage`.
+3. The `chrome.webRequest.onBeforeRequest` listener in the background service worker captures multipart POST and PUT bodies for uploads issued via XHR (the content script deliberately does not capture XHR request bodies, to avoid double-storing files in `chrome.storage.session`).
 4. All captured events flow to the **Snapshot Assembler** in the background service worker, which coalesces them into a single `AgentSnapshot` object.
-5. After 3 seconds of inactivity (debounced), the assembler serialises the snapshot into a zip archive and POSTs it to the local proxy at `http://localhost:7878/snapshots`.
+5. After 3 seconds of inactivity (debounced), the assembler serialises the snapshot into a zip archive and POSTs it to the local proxy at `http://localhost:7878/snapshots`, falling back to `http://127.0.0.1:7878` if `localhost` fails to connect (e.g. IPv6-only resolution).
 6. The proxy derives the storage path (`{tenant}/{agent-name}/{ISO-timestamp}.zip`), uploads the zip to the configured storage backend, and responds with the stored object key or file ID.
 7. The extension popup queries the proxy's `/snapshots` endpoint to list available snapshots and can initiate a restore via `/restore`.
 8. On restore, the proxy downloads the zip from the configured storage backend, unpacks it to a temp directory, and runs the ADK CLI to re-import artefacts in dependency order.
@@ -169,15 +173,21 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 | ID | Requirement |
 |---|---|
 | FR-1.1 | The extension MUST capture agent definitions from `GET /mfe_builder/api/v2/builder/agents` (list, minimal fields) and `GET /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}` (full detail) responses without any builder action. |
-| FR-1.2 | The extension MUST capture the full agent state from `PATCH /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}` responses, which include `toolsSelected[]` with complete tool binding objects. This PATCH response is the richest single capture point and is the primary snapshot trigger. |
-| FR-1.3 | The extension MUST capture tool metadata from `GET /mfe_builder/api/v2/builder/tools?ids={uuid}&ids={uuid}&...` (batch-fetch by UUID list). The response is a bare JSON array. |
+| FR-1.2 | The extension MUST capture the full agent state on every save. **v1.4 correction:** `PATCH /mfe_builder/api/v1/builder/orchestrate/agents/{uuid}` returns **204 No Content** on live tenants — there is no response body. The saved state is the PATCH **request body** (`name`, `display_name`, `instructions`, `llm`, `tools[]` uuids, `knowledge_base[]`, …; `toolsSelected[]` is typically **empty** on the request). The extension MUST capture the request body after a 2xx response and take the agent uuid from the URL (the body has no `id`). The `GET …/agents/{uuid}` detail response remains the source of `toolsSelected[]` with full bindings. |
+| FR-1.3 | The extension MUST capture tool metadata from `GET /mfe_builder/api/v2/builder/tools?ids={uuid}&ids={uuid}&...` (batch-fetch by UUID list). ~~The response is a bare JSON array.~~ **v1.4 correction:** the response is a paginated envelope `{ data: [...], total, limit, offset, result_count, hidden_tools_count }`; each element carries `id`, `name`, `binding`, and **`tenant_id`**. Bare arrays (older tenants) MUST still be accepted. Tools MUST be attached to an agent when their id appears in the agent's `tools[]` list, not only when they are already present from `toolsSelected[]`. |
 | FR-1.4 | The extension MUST capture connection metadata from `GET /mfe_builder/api/v1/orchestrate/connections/applications`. The response envelope is `{ applications: [...] }` — not `{ resources: [...] }`. |
 | FR-1.5 | The extension MUST capture knowledge base metadata from `GET /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}`. |
-| FR-1.6 | The extension MUST capture raw file bytes and filenames from the multipart `POST /mfe_builder/api/v1/orchestrate/knowledge-bases/documents` request body. This single request both creates the KB and uploads the first document; the KB UUID is returned in the `201` response body (`knowledge_base` field) rather than in the URL. The assembler MUST correlate pending file bytes with the UUID from the response. |
+| FR-1.6 | The extension MUST capture raw file bytes and filenames from the multipart `POST /mfe_builder/api/v1/orchestrate/knowledge-bases/documents` request body. This single request both creates the KB and uploads the first document; the KB UUID is returned in the `201` response body (`knowledge_base` field) rather than in the URL. The assembler MUST correlate pending file bytes with the UUID from the response. **v1.4:** the content script MUST read the `knowledge_base` uuid from the 201 body itself and emit `KB_FILE_CAPTURED` with that `kbId` (the pending-buffer path is the fallback when the response cannot be observed). The KB-detail pattern MUST NOT match this endpoint's URL. |
 | FR-1.7 | The extension MUST capture raw file bytes and filenames from the multipart `PUT /mfe_builder/api/v1/orchestrate/knowledge-bases/{uuid}/documents` request body. Note: the method is `PUT`, not `POST`. |
 | FR-1.8 | The extension MUST capture raw spec file bytes and filenames from multipart `POST /mfe_builder/api/v2/builder/tools` uploads (hand-crafted Python/OpenAPI tools only). Catalog tools added via the UI use a JSON `POST /mfe_builder/api/v1/builder/tools/create-from-template` request; their source files reside in S3 and are NOT transmitted to the mfe_builder API. For catalog tools, the snapshot records metadata and binding only, and sets `sourceUnavailable: true`. |
 | FR-1.9 | For any tool whose source file cannot be obtained from the API, the snapshot MUST record a `sourceUnavailable: true` flag in the tool's metadata so that the restore path can warn the builder rather than silently failing. |
 | FR-1.10 | The capture pipeline MUST be fully transparent: it MUST NOT alter any request or response observed by the wxO UI in any way. |
+| FR-1.14 | **(v1.3)** The content script MUST run in the page's **MAIN world** (`"world": "MAIN"` in `manifest.json`) so that its `window.fetch` and `XMLHttpRequest.prototype` overrides apply to the wxO UI's own JavaScript. An ISOLATED-world content script may only *observe*; its copies of these globals are separate from the page's. |
+| FR-1.15 | **(v1.3)** The content script MUST intercept **both** `fetch` and `XMLHttpRequest`. The wxO Agent Builder UI issues its `mfe_builder` API traffic through axios (XHR); a fetch-only interceptor captures nothing. XHR interception MUST use the same `CAPTURE_RESPONSE_PATTERNS` and emit the same message types as the fetch path. |
+| FR-1.16 | **(v1.3)** Because `chrome.*` APIs are unavailable in the MAIN world, captured events MUST be relayed to the background via `window.postMessage` on a dedicated channel (`__wxo_autosave__`) to a companion ISOLATED-world content script (`src/content/bridge.ts`). The bridge MUST accept only messages whose `event.source === window` and whose `type` is on an explicit allowlist, then forward via `chrome.runtime.sendMessage`. Neither content script may use module imports (the bundler emits a `chrome.runtime.getURL` loader that breaks the MAIN-world script and `document_start` timing); required helpers are inlined. |
+| FR-1.17 | ~~**(v1.3)** The content script MUST NOT capture XHR request bodies…~~ **v1.4 reversal:** the content script MUST capture upload bodies from **both** `fetch` and XHR. Live testing showed the `webRequest.onBeforeRequest` path never fires usefully (Chrome runs it before `onBeforeSendHeaders`, so the multipart `Content-Type` is unknown), which left XHR/axios uploads — the wxO UI's actual path — uncaptured. For XHR the content script reads the `File` entries of the `FormData` body directly (no multipart parsing) after a 2xx response. The double-storage concern is addressed by de-duplicating files by filename + byte length in the assembler (`dedupFiles`). |
+| FR-1.18 | **(v1.4)** Tenant identity: when the agent payload has no `tenant_id`, the content script MUST supply a `tenantHint` — the `x-ibm-wo-tenant-id` session cookie value (an opaque identifier, not a credential), else the page hostname. The assembler MUST prefer `tenant_id` from any payload (tool objects, connections envelope) and MUST never leave the tenant empty (`unknown-tenant` last resort). The proxy MUST never write a storage key rooted at `/`. |
+| FR-1.19 | **(v1.4)** Assembler event handlers MUST be serialised (single in-order queue). Bursts of concurrent read-modify-writes on `chrome.storage.session` (paginated tool fetches, 200+ connection records) lost updates. Connection lists MUST be applied as one batch. |
 | FR-1.11 | The assembler MUST debounce snapshot saves; the debounce window MUST default to 3 seconds after the last captured event and MUST be user-configurable. **Implementation note:** the default 3-second window is implemented and wired to `DEBOUNCE_DEFAULT_MS`. The user-configurable wiring from popup settings into the assembler is deferred to a follow-up. |
 | FR-1.12 | The background service worker MUST track the most recently observed `x-ibm-wo-csrf` header value in ephemeral memory (never persisted to any storage). ~~This is an IBM IAM bearer token~~ — **correction**: the wxO SaaS UI authenticates via session cookie plus `x-ibm-wo-csrf` header; there is no `Authorization: Bearer` header on UI requests. The CSRF token is session-scoped only and is captured solely for use in any proactive assembler API calls within the same browser session. |
 | FR-1.13 | The following high-frequency polling endpoints MUST NOT be captured: `GET .../agents/{uuid}/environment`, `GET .../knowledge-bases/{uuid}/status`. Capturing them would generate excessive noise with no useful snapshot data. |
@@ -194,7 +204,7 @@ The restore is executed by the proxy using the **ADK CLI** — the same tooling 
 | FR-2.4 | The scrubber MUST redact any key (case-insensitive, ignoring `-` and `_` separators) that matches: `api_key`, `apikey`, `token`, `password`, `passwd`, `client_secret`, `clientsecret`, `auth_config`, `authorization`, `secret`, `access_token`, `refresh_token`, `id_token`, `private_key`, `credential`, `credentials`. |
 | FR-2.5 | The local proxy MUST read storage credentials exclusively from environment variables or a local config file on the proxy host machine — never from the extension, the browser, or any network-transmitted payload. |
 | FR-2.6 | The connection `kind` field MUST be populated from the `security_scheme` field of the connections API response (confirmed values: `api_key_auth`, `basic_auth`, `bearer_token`, `key_value_creds`, `oauth2`). For MCP toolkit connections, `security_scheme` is `null` and `kind` MUST be recorded as an empty string — the `server_url` field still provides meaningful restore context in this case. |
-| FR-2.7 | The proxy CORS configuration MUST restrict requests to the extension's own origin (`chrome-extension://{extension-id}`) only. |
+| FR-2.7 | The proxy CORS configuration MUST restrict requests to the extension's own origin (`chrome-extension://{extension-id}`) only. **v1.3 clarification:** requests carrying *no* `Origin` header MUST be rejected (403). MV3 service-worker and popup fetches to a cross-origin `http://localhost` always send `Origin: chrome-extension://…`, so origin-less requests can only come from non-browser clients (curl, scripts) — which must not reach `POST /restore` (it shells out to the ADK CLI). The single exception is `GET /health` (see FR-7.10). |
 
 ---
 
@@ -244,7 +254,7 @@ connections/
 | FR-4.2 | The proxy MUST implement a **storage adapter interface** with at minimum one concrete adapter shipped in v1: an **S3-compatible adapter** covering IBM COS, AWS S3, and GCP Cloud Storage (using the AWS SDK v3 `@aws-sdk/client-s3` with a configurable `endpoint`). A **Google Drive adapter** is specified here but deferred to a follow-up (see note below). |
 | FR-4.3 | The storage adapter interface MUST define the following operations: `upload(path, bytes) → id`, `download(id) → bytes`, `list(prefix) → { id, path, timestamp, size }[]`, and `delete(id)`. All other proxy logic MUST depend only on this interface, never on a concrete adapter. |
 | FR-4.4 | The active storage backend MUST be selected via a `STORAGE_PROVIDER` environment variable or config file key. Valid values in v1: `cos`, `s3`, `gcs`. The value `gdrive` MUST be accepted but MUST return a clear unsupported error until the adapter is implemented. |
-| FR-4.5 | For the S3-compatible adapter, credentials MUST be read from environment variables or a local config file, never hardcoded. **v1.2 correction from v1.1:** IBM COS requires HMAC credentials — `COS_ACCESS_KEY_ID` and `COS_SECRET_ACCESS_KEY` (not `COS_API_KEY`). When `COS_INSTANCE_CRN` is set, the `ibm-service-instance-id` header is injected automatically via AWS SDK middleware. Standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` are used for AWS S3. GCS uses an S3-compatible endpoint (`storage.googleapis.com`) with GCS HMAC credentials. |
+| FR-4.5 | For the S3-compatible adapter, credentials MUST be read from environment variables or a local config file, never hardcoded. **v1.2 correction from v1.1:** IBM COS requires HMAC credentials — `COS_ACCESS_KEY_ID` and `COS_SECRET_ACCESS_KEY` (not `COS_API_KEY`). ~~When `COS_INSTANCE_CRN` is set, the `ibm-service-instance-id` header is injected automatically via AWS SDK middleware.~~ **v1.3 correction:** the CRN header is NOT injected. HMAC auth does not require `ibm-service-instance-id`, and injecting it as unsigned middleware after SigV4 signing caused COS to reject every write with `BadRequest`. `COS_INSTANCE_CRN` is still accepted by `readConfig()` for backward compatibility but is unused (see § 12.11). Standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` are used for AWS S3. GCS uses an S3-compatible endpoint (`storage.googleapis.com`) with GCS HMAC credentials. |
 | FR-4.6 | For the Google Drive adapter (deferred): (a) the proxy MUST implement the OAuth 2.0 authorization code flow using a Google Cloud project's client ID and secret, stored in environment variables (`GDRIVE_CLIENT_ID`, `GDRIVE_CLIENT_SECRET`); (b) the resulting OAuth tokens MUST be persisted to a local token cache file (path configurable, default `~/.wxo-autosave/gdrive-token.json`) and refreshed automatically using the refresh token; (c) on first run with `gdrive` provider, the proxy MUST print an authorization URL for the user to visit and accept a callback code, completing the one-time auth flow; (d) snapshots MUST be stored in a Google Drive folder named `wxo-autosave` (created automatically if absent), with subfolders mirroring the `{tenant}/{agent-name}/` path structure. |
 | FR-4.7 | The extension MUST maintain a local index of the most recent 5 snapshots in `chrome.storage.local` (tenant, agent name, timestamp, and proxy URL only — no file bytes) so that the popup can display recent history even when the proxy is temporarily offline. **Implemented:** `RECENT_SNAPSHOTS_KEY` in `src/shared/index.ts`; written by `appendRecentSnapshot()` in the assembler on each successful proxy POST. |
 | FR-4.8 | In-flight assembly state in the background service worker MUST be persisted to `chrome.storage.session` (not in-memory only) so that brief MV3 service worker suspensions do not lose a partially assembled snapshot. **Implemented:** `agentSnapshots` and `pendingKbFiles` storage keys in the assembler. |
@@ -280,7 +290,7 @@ connections/
 | FR-6.5 | The preflight display MUST show: one row per connection requiring re-credentialing (showing `app_id` and `kind`), and a warning for any `sourceUnavailable` tools. The builder MUST explicitly acknowledge this list before the restore proceeds. |
 | FR-6.6 | After the builder confirms, the popup MUST POST to `/restore` and display streaming progress and the final per-artefact result log. |
 | FR-6.7 | The popup MUST include a settings panel (stored in `chrome.storage.sync`) with: configurable proxy port (default `7878`), debounce delay in seconds, storage path prefix override, and a read-only display of the active storage provider reported by the proxy. |
-| FR-6.8 | When the local proxy is offline, the popup MUST fall back to the locally cached snapshot index from `chrome.storage.local` and display a warning that live history and restore are unavailable. |
+| FR-6.8 | When the local proxy is offline, the popup MUST fall back to the locally cached snapshot index from `chrome.storage.local` and display a warning that live history and restore are unavailable. **v1.3:** proxy liveness is determined by `GET /health` (not by an unparameterised `GET /snapshots`); all popup proxy calls try `localhost` then `127.0.0.1`. |
 | FR-6.9 | The popup bundle MUST NOT include any server-side Node APIs and MUST be kept as small as practical (no heavy UI framework required). |
 
 ---
@@ -289,15 +299,16 @@ connections/
 
 | ID | Requirement |
 |---|---|
-| FR-7.1 | The proxy MUST start with a single command and listen on a configurable port (default `7878`). **Implemented:** `npm start` in `wxo-autosave-proxy/` runs via Node 22 `--experimental-strip-types` (no compile step). |
+| FR-7.1 | The proxy MUST start with a single command and listen on a configurable port (default `7878`). **Implemented (v1.3):** `npm start` in `wxo-autosave-proxy/` runs `node --env-file-if-exists=.env --import tsx src/index.ts` — the `tsx` loader (a devDependency) executes `.ts` source directly with no compile step and loads `.env` if present. ~~Node 22 `--experimental-strip-types`~~ was never functional here: the source uses `.js` import specifiers (`./zip.js`), which Node's type stripper does not resolve to `.ts` files. Node ≥ 22.9 is required (for `--env-file-if-exists`). A dependency-free production path remains: `npm run build && npm run start:compiled`. |
 | FR-7.2 | `POST /snapshots` — accept a zip binary body, parse the embedded `manifest.json` to derive the storage path, upload via the active storage adapter, return HTTP 201 with `{ key, provider }` where `provider` identifies the backend used. |
-| FR-7.3 | `GET /snapshots?agent={name}&tenant={tenant}` — list all snapshot objects under the `{tenant}/{agent-name}/` prefix; return a JSON array of `{ key, timestamp, size }`. |
+| FR-7.3 | `GET /snapshots?agent={name}&tenant={tenant}` — list all snapshot objects under the `{tenant}/{agent-name}/` prefix; return a JSON array of `{ key, timestamp, size }`. **v1.3:** if `agent` or `tenant` is missing, return `200 []` rather than `400`, so the popup can render an empty history without an error path. |
 | FR-7.4 | `GET /restore/preflight?key={zip-key}` — see FR-5.1 and FR-5.2. |
 | FR-7.5 | `POST /restore` — see FR-5.3 through FR-5.10. Progress is streamed as NDJSON lines so the popup can render live status. |
-| FR-7.6 | The proxy MUST enforce CORS such that only `chrome-extension://{extension-id}` origins are accepted. |
+| FR-7.6 | The proxy MUST enforce CORS such that only `chrome-extension://{extension-id}` origins are accepted. Origin-less requests are rejected (see FR-2.7). |
 | FR-7.7 | The proxy MUST read all storage and ADK configuration from environment variables or a local config file. |
 | FR-7.8 | The proxy MUST include a `README.md` with installation instructions, environment variable reference, and a start command. **Implemented:** `wxo-autosave-proxy/README.md`. |
-| FR-7.9 | The proxy MUST require that the wxO ADK CLI is installed and authenticated (`orchestrate env activate`) on the same machine before restore operations can run. **Implemented:** `validateAdkCli()` is called at startup and exits with a clear error if the CLI is absent or unauthenticated. |
+| FR-7.9 | The proxy MUST require that the wxO ADK CLI is installed and authenticated (`orchestrate env activate`) on the same machine before restore operations can run. **Implemented:** `validateAdkCli()` is called at startup and exits with a clear error if the CLI is absent or unauthenticated. **v1.3:** the activation probe uses `orchestrate env list` (the `env get` subcommand does not exist in current ADK releases). |
+| FR-7.10 | **(v1.3)** `GET /health` — liveness probe returning `200 { "status": "ok" }`. This is the only route served to requests with no `Origin` header (it reveals nothing and mutates nothing); browser callers still receive CORS headers via the normal path. Used by the popup to distinguish "proxy offline" from "no history yet". |
 
 ---
 
@@ -309,8 +320,8 @@ connections/
 | NFR-2 | **Performance** | Network interception and event dispatch MUST add no perceptible latency to wxO UI interactions. The debounce mechanism ensures that snapshot assembly and zip serialisation happen out-of-band. |
 | NFR-3 | **Reliability** | The extension MUST continue to function correctly after MV3 service worker suspension events. In-flight assembly state MUST be preserved across suspensions using `chrome.storage.session`. |
 | NFR-4 | **Extensibility** | The storage adapter interface MUST decouple all backend-specific logic so that IBM COS, AWS S3, GCP Cloud Storage, Azure Blob, and Google Drive can all be used without changes to the proxy's core business logic. Adding a new backend requires only implementing the four-method adapter interface and registering it by name. |
-| NFR-5 | **Testability** | The credential scrubber and multipart decoder MUST be implemented as pure functions with no browser dependencies and MUST have unit tests. The zip serialiser MUST have a round-trip test. **Achieved:** 333 extension tests + 81 proxy tests = 414 total, all passing. |
-| NFR-6 | **Maintainability** | If wxO changes its REST API paths, only the endpoint pattern list in the content script needs to be updated. No business logic should be hardcoded to specific API paths. |
+| NFR-5 | **Testability** | The credential scrubber and multipart decoder MUST be implemented as pure functions with no browser dependencies and MUST have unit tests. The zip serialiser MUST have a round-trip test. **Achieved (v1.4):** 359 extension tests + 84 proxy tests = 443 total, all passing. |
+| NFR-6 | **Maintainability** | If wxO changes its REST API paths, only the endpoint pattern list in the content script needs to be updated. No business logic should be hardcoded to specific API paths. **v1.3 caveat:** because the MAIN-world content script cannot import from `src/shared/`, it carries inline copies of the credential-key list and the multipart decoder. Any change to `src/shared/scrubber.ts` or `src/shared/multipart.ts` MUST be mirrored in `src/content/index.ts` (`QUICK_SECRET_KEYS`, `parseMultipartInline`). |
 | NFR-7 | **Developer Experience** | A single `npm run build` in the extension project MUST produce a fully loadable Chrome extension in `dist/`. The proxy MUST start with a single command. |
 | NFR-8 | **Schema Versioning** | Every snapshot zip MUST carry a `schemaVersion` field in `manifest.json` so that future breaking format changes can be detected and migrated programmatically. |
 
@@ -323,10 +334,10 @@ connections/
 | SEC-1 | Credential data (API keys, bearer tokens, passwords, OAuth secrets) MUST NEVER appear in any snapshot zip, extension storage, log file, or network transmission. |
 | SEC-2 | The credential scrubber MUST be applied at two independent points in the pipeline (content script and background service worker) as a defence-in-depth measure. |
 | SEC-3 | The `x-ibm-wo-csrf` header value observed from wxO requests MUST be stored only in the background service worker's in-memory state. It MUST NOT be written to `chrome.storage`, transmitted to the proxy, or included in any log. ~~(Previously described as an IBM IAM bearer token — corrected in v1.1; the wxO SaaS UI does not use Authorization: Bearer.)~~ |
-| SEC-4 | The local proxy MUST NOT accept requests from any origin other than the extension itself (enforced via CORS `chrome-extension://{extension-id}`). |
+| SEC-4 | The local proxy MUST NOT accept requests from any origin other than the extension itself (enforced via CORS `chrome-extension://{extension-id}`). **v1.3:** requests with no `Origin` header are likewise rejected; `GET /health` is the sole exemption. |
 | SEC-5 | Storage credentials MUST be supplied to the proxy exclusively via environment variables or a local config file on the proxy's host machine. |
 | SEC-6 | The proxy MUST validate the structure of every received zip before unpacking it, to defend against path traversal attacks in malformed zip archives. **Implemented:** `unpackZip()` in `wxo-autosave-proxy/src/zip.ts` rejects any entry whose resolved path escapes the temp directory. |
-| SEC-7 | The extension MUST request only the minimum Chrome permissions necessary: `storage`, `tabs`, `webRequest`, and `host_permissions` scoped to `*://*.watson-orchestrate.cloud.ibm.com/*` and `http://localhost/*`. |
+| SEC-7 | The extension MUST request only the minimum Chrome permissions necessary: `storage`, `tabs`, `webRequest`, and `host_permissions` scoped to the wxO SaaS hostnames and the local proxy. **v1.3:** the wxO SaaS host set is `*://*.watson-orchestrate.cloud.ibm.com/*` (IBM Cloud-hosted) **and** `*://*.watson-orchestrate.ibm.com/*` (AWS-hosted / regulated regions, e.g. `us-east-1-reg`); the proxy host set is `http://localhost/*` **and** `http://127.0.0.1/*`. Both are IBM first-party domains; see § 11.6 and § 12.12. |
 
 ---
 
@@ -334,7 +345,9 @@ connections/
 
 | Constraint | Detail |
 |---|---|
-| **Chrome Manifest V3** | MV3 service workers cannot use `XMLHttpRequest` or read response bodies directly via `webRequest`. The content script `window.fetch` interceptor is the primary mechanism for response body capture. `webRequest.onBeforeRequest` with `requestBody` is used for multipart request body capture (both POST and PUT). |
+| **Chrome Manifest V3** | MV3 service workers cannot use `XMLHttpRequest` or read response bodies directly via `webRequest`. The content script `window.fetch` + `XMLHttpRequest` interceptor, running in the **MAIN world**, is the primary mechanism for response body capture. `webRequest.onBeforeRequest` with `requestBody` is used for multipart request body capture (both POST and PUT). |
+| **MAIN-world content scripts have no `chrome.*`** | A `"world": "MAIN"` content script shares the page's JS realm and can override its globals, but has no access to `chrome.runtime`. All communication to the extension goes via `window.postMessage` to an ISOLATED-world bridge. MAIN-world scripts also cannot use bundler module imports (the emitted loader calls `chrome.runtime.getURL`). |
+| **wxO UI uses axios (XHR), not fetch** | Confirmed during live E2E testing. A fetch-only interceptor captures nothing. XHR prototype patching is mandatory. |
 | **No response body in webRequest (MV3)** | Unlike MV2, the `webRequestBlocking` API is not available to ordinary MV3 extensions. The content script fetch interceptor is the only standards-compliant path for response body capture. |
 | **Proxy is always local** | The proxy runs on the builder's own machine. It is not a cloud service. Builders must run the proxy process themselves. |
 | **ADK CLI dependency** | Restore operations require the IBM watsonx Orchestrate ADK CLI to be installed and authenticated on the same machine as the proxy. The proxy shells out to the CLI. |
@@ -342,7 +355,7 @@ connections/
 | **Connection credentials** | By design, connection credential values are never captured. After a restore, the builder must re-enter credentials via the wxO UI or CLI. The restore system creates the connection shape only. |
 | **Single active agent session** | v1 captures one active agent at a time. Multiple concurrent agent builder sessions in different tabs are not supported. |
 | **KB create is a single atomic request** | Creating a new knowledge base and uploading the first document happens in a single `POST /v1/orchestrate/knowledge-bases/documents` multipart request. The KB UUID is not known until the `201` response body arrives. The assembler must buffer the captured file bytes and correlate them with the UUID from the response. |
-| **Node 22 required for proxy** | The proxy uses Node 22 `--experimental-strip-types` to run directly from `.ts` source without a build step. Node < 22 is not supported. |
+| **Node ≥ 22.9 required for proxy** | `npm start` runs `.ts` source directly via the `tsx` loader with `--env-file-if-exists=.env`. Node < 22.9 is not supported. (`--experimental-strip-types` is not used — it does not resolve the `.js`-suffixed relative imports the source uses.) |
 | **`exactOptionalPropertyTypes: true`** | Both the extension and proxy `tsconfig.json` set `exactOptionalPropertyTypes: true`. Optional properties may not be set to `undefined` explicitly — they must be omitted. |
 
 ---
@@ -352,8 +365,8 @@ connections/
 | ID | Decision | Status | Resolution / Notes |
 |---|---|---|---|
 | OD-1 | **Proxy server technology** | ✅ **Resolved** | **Node.js TypeScript, no framework.** Uses Node 22 `--experimental-strip-types`. The proxy uses only the Node standard `http` module plus `@aws-sdk/client-s3` and `fflate`. No Express or other framework. |
-| OD-2 | **Response body interception strategy** | ✅ **Resolved** | **Content script `window.fetch` override.** Confirmed design; validated against 4 HAR recordings on `us-south.watson-orchestrate.cloud.ibm.com`. |
-| OD-3 | **Proxy authentication** | ✅ **Resolved** | **Localhost-only, no shared secret for v1.** CORS enforcement limits requests to the extension origin. A shared secret may be warranted in a future version for teams sharing a proxy over a local network. |
+| OD-2 | **Response body interception strategy** | ✅ **Resolved (revised v1.3)** | **MAIN-world content script overriding `window.fetch` and patching `XMLHttpRequest.prototype`**, relayed to the background via a `postMessage` bridge. The v1.2 fetch-only, ISOLATED-world design captured nothing in live testing (see § 12.9). Endpoint patterns unchanged; still validated against the 4 HAR recordings. |
+| OD-3 | **Proxy authentication** | ✅ **Resolved** | **Localhost-only, no shared secret for v1.** CORS enforcement limits requests to the extension origin; origin-less requests are rejected (v1.3 reaffirmed after an interim relaxation was reverted — see § 12.13). A shared secret may be warranted in a future version for teams sharing a proxy over a local network. |
 | OD-4 | **Google Drive OAuth flow UX** | 🔲 **Open** | Relevant when the Google Drive adapter is implemented (deferred). The proxy could open the browser automatically (`open`/`xdg-open`) or print the URL for the user to visit. |
 | OD-5 | **wxO API endpoint verification** | ✅ **Resolved** | All endpoint paths confirmed against 4 live HAR recordings on `us-south.watson-orchestrate.cloud.ibm.com` (Aug 2026). |
 | OD-6 | **Extension distribution** | 🔲 **Open** | Side-load is sufficient for v1. Chrome Web Store publishing is a v2 consideration. |
@@ -436,6 +449,8 @@ All `mfe_builder` API paths were either wrong or missing in v1.0. Confirmed valu
 
 **Impact:** `manifest.json` `host_permissions`, content script `matches`, and `webRequest` URL filter patterns have all been updated. The shared constant `WXO_HOSTNAME` in `src/shared/index.ts` is corrected.
 
+> **v1.3 amendment:** The v1.1 finding was correct for the IBM Cloud-hosted SaaS but incomplete. wxO SaaS is also delivered on AWS and in regulated regions under **`*.watson-orchestrate.ibm.com`** (e.g. `api.us-east-1-reg.watson-orchestrate.ibm.com`, as documented in the ADK environment guide). Both hostname families are now supported: `WXO_HOSTNAME` (cloud.ibm.com) and `WXO_HOSTNAME_ALT` (ibm.com) in `src/shared/index.ts`, with matching entries in `host_permissions`, `content_scripts[].matches`, and the `webRequest` URL filters (`*_URL_FILTER_ALT`). See § 12.12.
+
 ---
 
 ## 12. Implementation Record
@@ -471,7 +486,7 @@ The `SNAPSHOT_READY` event type was added to `SnapshotEventType` and `SnapshotAs
 - Implemented as pure functions in `src/shared/` (scrubber, multipart decoder, zip serialiser, settings merge), or
 - Extracted inline into the test file as a faithful copy of the function under test (e.g., `rawBytesFromRequestBody`, `makeEventBus`, `extractedEmitSnapshotReady` in `background.test.ts`).
 
-This pattern means the test suite has zero mocked `chrome.*` calls. Current coverage: **333 extension tests** (9 test files) + **81 proxy tests** (4 test files) = **414 total**.
+This pattern means the test suite has zero mocked `chrome.*` calls. Current coverage: **359 extension tests** (10 test files) + **84 proxy tests** (4 test files) = **443 total**.
 
 ### 12.5 YAML files are JSON-encoded
 
@@ -489,6 +504,54 @@ The popup saves a `debounceMs` value to `chrome.storage.sync` via the settings p
 
 The `POST /restore` endpoint streams progress as newline-delimited JSON (NDJSON). Each line is a `{ step, status, message }` object. The popup reads the response as a stream and updates the progress overlay in real time, then shows the final per-artefact result log when the stream closes.
 
+### 12.9 MAIN-world content script and postMessage bridge (v1.3, revises OD-2)
+
+**Root cause found in live E2E testing:** the v1.2 content script ran in Chrome's default ISOLATED world. Content scripts there receive their *own* copies of `window.fetch` and `XMLHttpRequest`; overriding them never affects the page's JavaScript. Additionally, the wxO Agent Builder UI issues its `mfe_builder` API calls through axios, i.e. `XMLHttpRequest`, so even a working fetch override would have missed nearly all traffic. **Nothing was ever captured.**
+
+**Fix:**
+
+- `src/content/index.ts` is declared with `"world": "MAIN"` in `manifest.json`. It overrides `window.fetch` and patches `XMLHttpRequest.prototype.open` / `setRequestHeader` / `send`. XHR responses are read on the `load` event for 2xx JSON bodies matching `CAPTURE_RESPONSE_PATTERNS`, then pass through the same `emitCapturedResponse()` helper as the fetch path. The `x-ibm-wo-csrf` header is observed on both paths.
+- `src/content/bridge.ts` (new) is a second content script in the ISOLATED world with the same `matches` and `document_start`. It listens for `window.postMessage` on channel `__wxo_autosave__`, accepts only same-window sources and an allowlist of eight message types, and relays via `chrome.runtime.sendMessage`. It is listed **first** in `content_scripts` so its listener is registered before the interceptor fires.
+- Neither content script uses module imports. `@samrum/vite-plugin-web-extension` emits a `chrome.runtime.getURL`-based loader for content scripts with imports, which is unavailable in the MAIN world and shifts execution past `document_start`. Consequently `src/content/index.ts` carries inline copies of the credential-key list (`QUICK_SECRET_KEYS` / `quickScrub` / `scrubConnection`) and a self-contained multipart decoder (`parseMultipartInline`). The full `src/shared/` scrubber still runs in the background service worker (SEC-2 defence-in-depth is preserved).
+- The connections response is now emitted as a single `CONNECTION_BATCH_CAPTURED` message (payload `ConnectionPayload[]`). The background handler re-applies `scrubConnectionPayload()` per item and fans out individual `CONNECTION_CAPTURED` events, so the assembler is unchanged.
+- XHR **request** bodies are deliberately not captured in the content script (FR-1.17): the background `webRequest.onBeforeRequest` path already captures them, and `attachFilesToKnowledgeBase()` appends without de-duplication.
+
+### 12.10 Proxy runtime — `tsx` loader, `.env` support (v1.3, amends OD-1 / FR-7.1)
+
+The v1.2 claim that the proxy runs under `node --experimental-strip-types` was never true in practice: the source uses TypeScript-for-ESM `.js` import specifiers (`import … from "./zip.js"`), which Node's type stripper does not rewrite to `.ts`. `npm start` now runs `node --env-file-if-exists=.env --import tsx src/index.ts`. `tsx` is a **devDependency** (dev-time loader, not a runtime dependency of the built artefact); production deps remain `@aws-sdk/client-s3` + `fflate`. A tracked `.env.example` documents every variable; `.env` itself is git-ignored. Minimum Node is 22.9 (`--env-file-if-exists`). The compiled path (`npm run build && npm run start:compiled`) needs no loader.
+
+### 12.11 IBM COS CRN middleware removed (v1.3, corrects FR-4.5 / § 12.2)
+
+The `ibm-service-instance-id` middleware injected the header at the SDK `build` step — after SigV4 signing — so COS rejected every `PutObject` with `BadRequest`. HMAC-authenticated COS does not need this header (it is only relevant to IAM bearer-token auth). The middleware is removed. `COS_INSTANCE_CRN` remains accepted by `readConfig()` for backward compatibility but is unused; the README marks it deprecated.
+
+### 12.12 AWS-hosted wxO tenants — `*.watson-orchestrate.ibm.com` (v1.3, amends § 11.6 / SEC-7)
+
+wxO SaaS is delivered on IBM Cloud (`*.watson-orchestrate.cloud.ibm.com`, confirmed by HAR) and on AWS / regulated regions (`*.watson-orchestrate.ibm.com`, e.g. `us-east-1-reg`, per the ADK environment documentation). Both are IBM first-party domains, so adding the second pattern does not widen the extension's reach beyond the wxO product. `WXO_HOSTNAME_ALT` was added; `manifest.json`, `content_scripts[].matches`, and the background `*_URL_FILTER_ALT` set were extended. `http://127.0.0.1/*` was added to `host_permissions` for the proxy-host fallback (§ 12.14).
+
+### 12.13 CORS: empty-Origin relaxation reverted (v1.3, reaffirms SEC-4 / OD-3)
+
+An interim change accepted requests with no `Origin` header (rationale: "service workers, curl, same-machine"). This was reverted before merge. Per the Fetch spec, cross-origin requests from extension contexts — including the MV3 service worker POSTing to `http://localhost` — always carry `Origin: chrome-extension://<id>`, so the extension never needs the exemption; only non-browser clients lack `Origin`, and those must not reach `POST /restore`. `GET /health` is served origin-less as a liveness probe (FR-7.10). `TESTING.md` curl examples pass `-H "Origin: chrome-extension://e2e"`.
+
+### 12.15 Agent PATCH is 204 — request body captured (v1.4, corrects FR-1.2 / § 11.4)
+
+On `dl.watson-orchestrate.ibm.com` the save PATCH returns 204 with no body, and its request body has `toolsSelected: []` with `tools: [uuid, …]`. The v1.1 HAR-derived claim that the PATCH *response* is "the richest capture" did not hold. Both interceptors now read the PATCH request body (`request.clone().json()` / the `xhr.send(body)` string) and forward it as `AGENT_CAPTURED` after a 2xx, with the agent uuid taken from the URL (`agentIdFromUrl`). `SnapshotAgent` gained `tools: string[]`; `handleAgentCaptured` prunes tools the agent no longer references; `handleToolCaptured` accepts tools whose id is in `agent.tools`. Consequence: adding a KB or tool and saving now updates the snapshot even though the UI does not re-GET the agent.
+
+### 12.16 Tenant from the session cookie (v1.4, FR-1.18)
+
+Agent payloads on this tenant carry no `tenant_id`; the earlier snapshots were stored under `/{agent}/…`. The MAIN-world script now reads `document.cookie` for `x-ibm-wo-tenant-id` and sends it as `AgentPayload.tenantHint`; `pickTenant()` prefers a payload `tenant_id` (present on tool objects and the connections envelope), then the snapshot's existing tenant, then the hint, then `unknown-tenant`. The proxy sanitises both path segments (`pathSegment()`), so keys are never `/`-rooted. Snapshots written before this fix remain under the leading-slash prefix and will not appear in the popup list.
+
+### 12.17 Upload capture via FormData; KB-create regex collision (v1.4, FR-1.6 / FR-1.17)
+
+The `webRequest` upload path is effectively dead (lifecycle ordering) and, on file uploads, Chrome may expose `requestBody.raw[].file` paths rather than bytes anyway. The XHR interceptor now reads `FormData` `File` entries directly and emits `KB_FILE_CAPTURED` / `TOOL_FILE_CAPTURED` after a 2xx; for the KB-create POST the `kbId` is taken from the 201 body's `knowledge_base`. `attachFilesToKnowledgeBase()` de-duplicates by filename + length so multiple observation paths cannot double-store. The KB-detail regex now excludes `…/knowledge-bases/documents` (the create endpoint), whose 201 body was being mis-routed as KB meta with no `id`. When a file arrives for a KB the agent does not yet list (the PATCH comes after), it is attached to the most recently active agent (single-agent session, § 9) rather than dropped; the later `AGENT_CAPTURED` / `KB_META_CAPTURED` confirm ownership.
+
+### 12.18 Serialised assembler and batch connections (v1.4, FR-1.19)
+
+217 connection records arriving as independent async handlers each did `readSnapshots → mutate → writeSnapshots`; last-writer-wins dropped all but one matched connection. `registerAssembler()` now routes every handler through one promise queue, and `CONNECTION_BATCH_CAPTURED` is delivered to the assembler as a single event applied in one read-modify-write. Pipeline logs (`snapshot uploaded (N bytes) → key`, `snapshot saved`) are `console.info` so they show without the Verbose filter.
+
+### 12.14 Proxy host fallback and `/health` (v1.3)
+
+Both the assembler and the popup route proxy calls through `tryFetch(port, path)`, which tries `http://localhost:<port>` then `http://127.0.0.1:<port>` on network error (some hosts resolve `localhost` to `::1` only while the proxy binds IPv4). The popup's liveness check uses `GET /health` instead of a parameterless `GET /snapshots`. Two popup bugs found in E2E were fixed: `[hidden]` was overridden by `display:flex` on overlays (CSS `.overlay[hidden]` rule added), and `executeRestore()` read `pendingRestoreKey` *after* `hidePreflightOverlay()` had cleared it (restore POSTed an empty key).
+
 ---
 
 ## 13. Glossary
@@ -503,7 +566,9 @@ The `POST /restore` endpoint streams progress as newline-delimited JSON (NDJSON)
 | **Google Drive adapter** | The storage adapter implementation that stores snapshot zips as files in a user's Google Drive, organised under a `wxo-autosave/` folder hierarchy, using the Google Drive API v3 with OAuth 2.0. Deferred to a follow-up release. |
 | **OAuth 2.0 authorization code flow** | The three-legged OAuth flow used by the Google Drive adapter |
 | **Storage adapter interface** | The abstract interface all storage backends implement, defining `upload`, `download`, `list`, and `delete` operations |
-| **Content Script** | A JavaScript file injected by the extension into the wxO Agent Builder page, with access to the page's DOM and JavaScript context, including `window.fetch` |
+| **Content Script** | A JavaScript file injected by the extension into the wxO Agent Builder page. This project uses two: `src/content/index.ts` in the **MAIN world** (shares the page's JS realm; can override `window.fetch` / `XMLHttpRequest`; no `chrome.*` APIs) and `src/content/bridge.ts` in the **ISOLATED world** (has `chrome.runtime`; relays messages from the MAIN-world script). |
+| **Bridge (bridge.ts)** | The ISOLATED-world content script that receives `window.postMessage` events on the `__wxo_autosave__` channel from the MAIN-world interceptor, validates them against an allowlist, and forwards them to the background service worker via `chrome.runtime.sendMessage`. |
+| **MAIN world / ISOLATED world** | Chrome's two JavaScript execution contexts for content scripts. ISOLATED (default) has extension APIs but separate copies of page globals; MAIN shares the page's globals but has no extension APIs. Selected per script via `"world"` in `manifest.json`. |
 | **Debounce** | A technique that delays an action until a specified period of inactivity has passed |
 | **kind** | The authentication scheme type of a wxO connection, sourced from the `security_scheme` field in the connections API response (e.g. `api_key_auth`, `basic_auth`, `bearer_token`, `key_value_creds`, `oauth2`). Empty string for MCP toolkit connections where `security_scheme` is null. |
 | **MV3** | Chrome Extension Manifest Version 3 |
@@ -530,6 +595,7 @@ This project is open to community contributions. Here are the best ways to help:
 
 - **Implement the Google Drive storage adapter** — interface and spec fully defined in FR-4.6; proxy factory and `StorageAdapter` interface are already in place; `STORAGE_PROVIDER=gdrive` returns a clear unsupported error today
 - **Implement the Azure Blob storage adapter** — same `StorageAdapter` interface; env vars `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_KEY` / `AZURE_CONTAINER` are the expected config shape
+- **Add a parity test for the inline content-script helpers** — `src/content/index.ts` carries inline copies of the credential-key list and multipart decoder (see NFR-6 caveat, § 12.9); a test that parses the source and asserts `QUICK_SECRET_KEYS` matches `src/shared/scrubber.ts` would catch drift
 - **Wire `debounceMs` from popup settings into the assembler** — the value is already saved to `chrome.storage.sync`; `scheduleSnapshotReady()` just needs to read it before setting the timer (FR-1.11)
 - **Live E2E validation** — load the extension against a real wxO SaaS tenant and COS bucket; follow the runbook in `TESTING.md`
 
@@ -556,7 +622,8 @@ wxo-ui-agent-autosave/              # Chrome/Edge extension (TypeScript, Vite, M
       index.ts                      # Service worker: message dispatch, webRequest, event bus (on/emit)
       assembler.ts                  # Snapshot assembler: KB correlation, debounce, SNAPSHOT_READY
     content/
-      index.ts                      # Content script: fetch interceptor
+      index.ts                      # MAIN-world content script: fetch + XHR interceptor, inline scrubber/multipart, postMessage → bridge
+      bridge.ts                     # ISOLATED-world relay: postMessage → chrome.runtime.sendMessage (no imports)
     popup/
       index.html                    # Full popup markup
       popup.css                     # Popup styles
@@ -568,7 +635,8 @@ wxo-ui-agent-autosave/              # Chrome/Edge extension (TypeScript, Vite, M
       multipart.ts                  # Multipart decoder (pure, tested)
       zip.ts                        # buildZip / parseZip using fflate (pure, tested)
       settings.ts                   # PopupSettings, mergeSettings, readSettings, writeSettings
-      __tests__/                    # 333 tests across 9 files
+      capture.ts                    # Pure capture helpers: agentIdFromUrl, tenant pick, tools envelope, dedupFiles (tested)
+      __tests__/                    # 359 tests across 10 files
   wxo-autosave-extension-plan.md    # Implementation plan with sub-task status and deviations
 
 wxo-autosave-proxy/                 # Local proxy server (Node.js TypeScript, no framework)
@@ -583,13 +651,15 @@ wxo-autosave-proxy/                 # Local proxy server (Node.js TypeScript, no
       adapter.ts                    # StorageAdapter interface
       cos.ts                        # S3StorageAdapter (COS / S3 / GCS)
       index.ts                      # createStorageAdapter factory
-    __tests__/                      # 81 tests across 4 files
+    __tests__/                      # 84 tests across 4 files
+  .env.example                      # Tracked config template (copy to .env, which is git-ignored)
   README.md                         # Install, env var reference, API docs, restore progress format
 
 wxo-agent-backup-recovery-requirements.md   # This file
 TESTING.md                                  # E2E runbook: 4 test scenarios, environment setup
+CHANGELOG.md                                # Dated, per-file change log
 ```
 
 ---
 
-*Requirements document v1.2 — updated to reflect completed v1 implementation (Aug 2026). For questions, open a GitHub Issue.*
+*Requirements document v1.4 — live-tenant capture fixes (Aug 2026). For questions, open a GitHub Issue.*

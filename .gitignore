@@ -11,6 +11,7 @@ dist/
 .env
 .env.*
 *.env
+!.env.example
 config.local.*
 
 # OS
@@ -27,3 +28,8 @@ Thumbs.db
 
 #developer-tools-chrome
 *.har
+
+#AI
+.bob
+AGENTS.md
+

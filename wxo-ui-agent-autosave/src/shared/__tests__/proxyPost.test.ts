@@ -25,6 +25,7 @@ function makeSnapshot(agentId = "agent-001"): AgentSnapshot {
       id: agentId,
       name: "my-agent",
       guidelines: [],
+      tools: [],
       knowledge_base: [],
       collaborators: [],
       tags: [],

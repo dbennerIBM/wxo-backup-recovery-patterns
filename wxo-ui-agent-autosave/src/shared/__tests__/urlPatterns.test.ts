@@ -37,7 +37,7 @@ const AGENT_V1_RE = /\/mfe_builder\/api\/v1\/builder\/orchestrate\/agents\/[^/?]
 const TOOL_V2_RE = /\/mfe_builder\/api\/v2\/builder\/tools(\?|$)/;
 const CONNECTION_RE = /\/mfe_builder\/api\/v1\/orchestrate\/connections\/applications(\?|$)/;
 // CONFIRMED HAR 4: ALL KB paths are /v1/orchestrate/, NOT /v2/builder/
-const KB_META_RE    = /\/mfe_builder\/api\/v1\/orchestrate\/knowledge-bases\/[^/?]+(\?|$)/;
+const KB_META_RE    = /\/mfe_builder\/api\/v1\/orchestrate\/knowledge-bases\/(?!documents(?:\?|$))[^/?]+(\?|$)/;
 const KB_CREATE_RE  = /\/mfe_builder\/api\/v1\/orchestrate\/knowledge-bases\/documents(\?|$)/;
 const KB_UPLOAD_RE  = /\/mfe_builder\/api\/v1\/orchestrate\/knowledge-bases\/([^/?]+)\/documents(\?|$)/;
 
@@ -182,6 +182,10 @@ describe("KB patterns — v1/orchestrate (CONFIRMED HAR 4)", () => {
     });
     it("does NOT match the OLD v2/builder path", () => {
       expect(matches(KB_META_RE, `/mfe_builder/api/v2/builder/knowledge-bases/${KB_UUID}`)).toBe(false);
+    });
+    it("does NOT match the KB-create endpoint /knowledge-bases/documents (its 201 body is not KB meta)", () => {
+      expect(matches(KB_META_RE, "/mfe_builder/api/v1/orchestrate/knowledge-bases/documents")).toBe(false);
+      expect(matches(KB_META_RE, "/mfe_builder/api/v1/orchestrate/knowledge-bases/documents?workspace_id=0")).toBe(false);
     });
     it("does NOT match /documents sub-path (upload, not detail)", () => {
       expect(matches(KB_META_RE, `/mfe_builder/api/v1/orchestrate/knowledge-bases/${KB_UUID}/documents`)).toBe(false);

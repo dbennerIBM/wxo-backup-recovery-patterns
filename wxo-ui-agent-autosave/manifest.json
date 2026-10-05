@@ -12,7 +12,9 @@
 
   "host_permissions": [
     "*://*.watson-orchestrate.cloud.ibm.com/*",
-    "http://localhost/*"
+    "*://*.watson-orchestrate.ibm.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
 
   "background": {
@@ -23,10 +25,20 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.watson-orchestrate.cloud.ibm.com/*"
+        "*://*.watson-orchestrate.cloud.ibm.com/*",
+        "*://*.watson-orchestrate.ibm.com/*"
+      ],
+      "js": ["src/content/bridge.ts"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://*.watson-orchestrate.cloud.ibm.com/*",
+        "*://*.watson-orchestrate.ibm.com/*"
       ],
       "js": ["src/content/index.ts"],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
 

@@ -69,24 +69,9 @@ export class S3StorageAdapter implements StorageAdapter {
       clientConfig.forcePathStyle = config.provider !== "s3";
     }
 
-    // IBM COS: attach IBM service instance CRN as a custom header on every request.
-    if (config.instanceCrn) {
-      const crn = config.instanceCrn;
-      clientConfig.customUserAgent = `wxo-autosave-proxy/0.1.0`;
-      // Middleware approach — inject the ibm-service-instance-id header.
-      this.client = new S3Client(clientConfig);
-      this.client.middlewareStack.add(
-        (next) => (args) => {
-          const req = args.request as { headers?: Record<string, string> };
-          if (req.headers) {
-            req.headers["ibm-service-instance-id"] = crn;
-          }
-          return next(args);
-        },
-        { step: "build", name: "ibmCrnHeader" },
-      );
-      return;
-    }
+    // IBM COS with HMAC credentials does NOT need the ibm-service-instance-id
+    // header -- that header is only required for IAM bearer-token auth and it
+    // breaks the S3 HMAC signature when injected as unsigned middleware.
 
     this.client = new S3Client(clientConfig);
   }
